@@ -14,6 +14,7 @@ import type { ConnectedRepositoryStore } from "../github/repositories.js";
 import { handleGitHubWebhook, type GitHubWebhookRuntime } from "../github/webhooks.js";
 import { OpenCodeChatError, type ChatProvider } from "./provider.js";
 import type { ChatStore } from "./store.js";
+import { RunRequestError, type RunService } from "../runs/service.js";
 
 const messageInput = z.object({ content: z.string().trim().min(1).max(4000) }).strict();
 const agentAccessInput = z.object({ enabled: z.boolean() }).strict();
@@ -21,6 +22,7 @@ const agentJobInput = z.object({ repositoryId: z.number().int().positive(), inst
 const uuid = z.string().uuid();
 const assets: Record<string, [string, string]> = {
   "/": ["index.html", "text/html"], "/app.js": ["app.js", "text/javascript"], "/style.css": ["style.css", "text/css"],
+  "/goals": ["goals.html", "text/html"], "/goals.js": ["goals.js", "text/javascript"],
 };
 const SESSION_COOKIE = "journey_session";
 const OAUTH_STATE_COOKIE = "journey_oauth_state";
@@ -93,6 +95,7 @@ export function createChatApp(
   auth?: AuthRuntime,
   appOrigin = `http://localhost:${port}`,
   githubApp?: GitHubAppRuntime,
+  runs?: RunService,
 ) {
   const busy = new Set<string>();
   const configuredOrigin = new URL(appOrigin).origin;
@@ -160,6 +163,7 @@ export function createChatApp(
           githubWebhookEnabled: Boolean(githubApp?.webhook),
           agentCredentialBrokerEnabled: Boolean(githubApp?.credentialBroker),
           agentExecutionEnabled: Boolean(githubApp?.repositoryExecutor),
+          goalPlanningEnabled: Boolean(runs),
         });
       }
 
@@ -349,6 +353,30 @@ export function createChatApp(
         if (!uuid.safeParse(agentJobMatch[1]).success) return json({ error: "Invalid agent job." }, 400);
         const job = await githubApp.jobStore.get(agentJobMatch[1]!, user.userId);
         return job ? json(job) : json({ error: "Agent job not found." }, 404);
+      }
+
+      if (url.pathname === "/api/runs" || url.pathname.startsWith("/api/runs/")) {
+        if (!runs) return json({ error: "Goal planning is not configured." }, 503);
+        const ownerId = await ownerForChat();
+        if (!ownerId) return json({ error: "Sign in with GitHub to continue." }, 401);
+        try {
+          if (url.pathname === "/api/runs") {
+            if (request.method === "GET") return json(await runs.list(ownerId));
+            if (request.method === "POST") {
+              let input;
+              try { input = await request.json(); } catch { return json({ error: "Send a valid JSON goal and success criteria." }, 400); }
+              return json(await runs.create(ownerId, input), 201);
+            }
+          }
+          const match = /^\/api\/runs\/([^/]+)(\/plan)?$/.exec(url.pathname);
+          if (!match || !uuid.safeParse(match[1]).success) return json({ error: "Run not found." }, 404);
+          if (request.method === "GET" && !match[2]) return json(await runs.get(ownerId, match[1]!));
+          if (request.method === "POST" && match[2]) return json(await runs.plan(ownerId, match[1]!));
+          return json({ error: "Not found." }, 404);
+        } catch (error) {
+          if (error instanceof RunRequestError) return json({ error: error.message }, error.status);
+          throw error;
+        }
       }
 
       if (url.pathname.startsWith("/api/chats")) {

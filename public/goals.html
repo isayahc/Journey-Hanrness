@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Journey Harness · Goals</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/goals.js" defer></script>
+</head>
+<body>
+  <aside>
+    <a class="brand" href="/" aria-label="Journey Harness">journey<span>·</span></a>
+    <button id="new-goal" class="new-chat" type="button">＋ New goal</button>
+    <a class="sidebar-action" href="/">Back to chat</a>
+    <h2>YOUR GOALS</h2>
+    <nav id="run-history" aria-label="Saved goals"></nav>
+    <div class="sidebar-footer">One step at a time.</div>
+  </aside>
+  <main>
+    <header><span>YOUR WORKSPACE <span class="separator">/</span> <strong>Goals &amp; plans</strong></span><span id="run-mode">Connecting…</span></header>
+    <div id="goals-workspace" class="goals-workspace" hidden>
+      <div class="eyebrow">GIVE YOUR AGENT A DIRECTION</div>
+      <h1>What needs to get done?</h1>
+      <p class="goal-intro" id="storage-note">Save a goal and define what success looks like. Your agent will propose the steps to get there.</p>
+      <p id="run-error" class="run-error" role="alert" hidden></p>
+      <details id="new-run" open>
+        <summary>Create a goal</summary>
+        <form id="goal-form" class="goal-form">
+          <label for="goal">Goal</label>
+          <textarea id="goal" name="goal" rows="3" maxlength="4000" placeholder="What outcome do you want?" required></textarea>
+          <label for="criteria">Success criteria <span>One measurable result per line; up to 10.</span></label>
+          <textarea id="criteria" name="criteria" rows="3" maxlength="5010" placeholder="What evidence would show the goal was achieved?" required></textarea>
+          <fieldset>
+            <legend>Execution limits</legend>
+            <div class="goal-limits">
+              <label for="max-steps">Maximum steps<input id="max-steps" type="number" min="1" max="20" value="8" required></label>
+              <label for="max-attempts">Attempts per step<input id="max-attempts" type="number" min="1" max="5" value="3" required></label>
+              <label for="max-minutes">Time budget (minutes)<input id="max-minutes" type="number" min="1" max="240" value="30" required></label>
+            </div>
+          </fieldset>
+          <p class="goal-note">This creates a plan. Steps will not run yet. Your limits are saved for execution.</p>
+          <button id="create-run" class="goal-primary" type="submit">Save goal &amp; generate plan</button>
+        </form>
+      </details>
+      <section id="run-detail" aria-label="Selected goal" hidden>
+        <div class="run-heading"><h2 id="run-title"></h2><button id="refresh-run" type="button">Refresh</button></div>
+        <p id="run-status" role="status" aria-live="polite"></p>
+        <p id="run-metadata" class="goal-note"></p>
+        <h3>Success criteria</h3><ul id="run-criteria"></ul>
+        <p id="planning-error" class="run-error" role="alert" hidden></p>
+        <button id="plan-run" class="goal-primary" type="button" hidden>Generate plan</button>
+        <div id="plan-result" hidden>
+          <h3>Proposed execution plan</h3><p id="plan-summary"></p>
+          <ol id="plan-steps" class="plan-steps"></ol>
+          <p class="goal-note">Plan saved. No steps have been executed.</p>
+        </div>
+      </section>
+    </div>
+    <section id="goals-auth" class="goals-workspace" hidden><h1>Sign in to your workspace.</h1><p>Your goals stay tied to your account.</p><a class="github-signin" href="/auth/github">Continue with GitHub</a></section>
+    <p id="goals-unavailable" class="workspace-status" role="alert" hidden></p>
+  </main>
+</body>
+</html>

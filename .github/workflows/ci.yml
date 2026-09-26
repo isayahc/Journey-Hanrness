@@ -25,6 +25,16 @@ jobs:
         env:
           MONGODB_TEST_URI: mongodb://127.0.0.1:27017
       - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+        env:
+          MONGODB_TEST_URI: mongodb://127.0.0.1:27017
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: goal-plan-screenshots
+          path: goal-plan-*.png
+          if-no-files-found: ignore
   setup:
     timeout-minutes: 8
     strategy:
