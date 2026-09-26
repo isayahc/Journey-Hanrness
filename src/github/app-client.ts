@@ -61,7 +61,16 @@ export interface GitHubRepositoryHeadClient {
     repositoryId: number,
     fullName: string,
     branch: string,
-  ): Promise<string>;
+  ): Promise<string | null>;
+}
+
+export interface GitHubRepositoryInitializer {
+  initializeRepository(
+    installationId: number,
+    repositoryId: number,
+    fullName: string,
+    branch: string,
+  ): Promise<void>;
 }
 
 export interface GitHubPullRequestClient {
@@ -98,7 +107,7 @@ function validateBranch(branch: string) {
   }
 }
 
-export class GitHubAppClient implements GitHubAppRepositoryClient, GitHubRepositoryHeadClient, GitHubPullRequestClient, GitHubInstallationCredentialMinter {
+export class GitHubAppClient implements GitHubAppRepositoryClient, GitHubRepositoryHeadClient, GitHubRepositoryInitializer, GitHubPullRequestClient, GitHubInstallationCredentialMinter {
   constructor(
     private appId: string,
     private privateKey: string,
@@ -185,8 +194,38 @@ export class GitHubAppClient implements GitHubAppRepositoryClient, GitHubReposit
         },
       },
     );
+    if (response.status === 409) {
+      const payload = await response.json().catch(() => undefined);
+      if (payload && typeof payload === "object" && "message" in payload && payload.message === "Git Repository is empty.") return null;
+    }
     if (!response.ok) throw new Error("GITHUB_BRANCH_HEAD_LOOKUP_FAILED");
     return gitRefResponse.parse(await response.json()).object.sha;
+  }
+
+  async initializeRepository(
+    installationId: number,
+    repositoryId: number,
+    fullName: string,
+    branch: string,
+  ) {
+    validateRepositoryName(fullName);
+    validateBranch(branch);
+    const credential = await this.mintRepositoryCredential(installationId, repositoryId, { contents: "write" });
+    const response = await this.request(`https://api.github.com/repos/${fullName}/contents/.journey-harness/.gitkeep`, {
+      method: "PUT",
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${credential.token}`,
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2026-03-10",
+      },
+      body: JSON.stringify({
+        message: "Initialize repository for journey-harness",
+        content: Buffer.from("Repository initialized by journey-harness.\n", "utf8").toString("base64"),
+        branch,
+      }),
+    });
+    if (!response.ok) throw new Error("GITHUB_REPOSITORY_INITIALIZATION_FAILED");
   }
 
   /** Reconcile an uncertain PR request using its unique job branch, including closed PRs. */
