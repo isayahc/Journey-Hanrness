@@ -49,6 +49,22 @@
       </div>
       <p id="repo-sync-note" class="repo-sync-note" hidden></p>
       <div id="repository-list" class="repository-list"></div>
+      <section class="agent-jobs" aria-labelledby="agent-jobs-title">
+        <h2 id="agent-jobs-title">Repository agent jobs</h2>
+        <p>Describe a change to make in an enabled repository. Review the resulting pull request before merging.</p>
+        <p id="agent-job-note" role="status"></p>
+        <form id="agent-job-form" class="goal-form">
+          <label for="agent-repository">Repository</label>
+          <select id="agent-repository" required></select>
+          <label for="agent-instruction">What should the agent change?</label>
+          <textarea id="agent-instruction" rows="4" maxlength="12000" required placeholder="Describe the change and how to verify it…"></textarea>
+          <button id="submit-agent-job" class="goal-primary" type="submit">Start agent job</button>
+        </form>
+        <p id="agent-job-error" class="run-error" role="alert" hidden></p>
+        <div class="run-heading"><h3>Recent jobs</h3><button id="refresh-agent-jobs" type="button">Refresh jobs</button></div>
+        <p id="agent-job-updates" class="sr-only" role="status"></p>
+        <div id="agent-job-list"></div>
+      </section>
     </section>
     <div id="chat-workspace">
       <div id="messages" role="log" aria-label="Conversation" aria-live="polite"></div>

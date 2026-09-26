@@ -65,6 +65,7 @@ type AgentJobExecutionPatch = Partial<Pick<
 
 export interface AgentJobAuthorizationStore {
   init(): Promise<void>;
+  listForUser(userId: string): Promise<AgentJobAuthorization[]>;
   claim(jobId: string, userId: string, leaseUntil: Date): Promise<AgentJobAuthorization | null>;
   create(jobId: string, userId: string, repositoryId: number, metadata?: Omit<CreateAgentJobInput, "jobId" | "userId" | "repositoryId">): Promise<AgentJobAuthorization>;
   get(jobId: string, userId: string): Promise<AgentJobAuthorization | null>;
@@ -82,6 +83,12 @@ export class MongoAgentJobAuthorizationStore implements AgentJobAuthorizationSto
       this.jobs.createIndex({ userId: 1, repositoryId: 1, status: 1 }),
       this.jobs.createIndex({ userId: 1, createdAt: -1 }),
     ]);
+  }
+
+  /** Return the owner's latest jobs for the repository monitor. */
+  async listForUser(userId: string): Promise<AgentJobAuthorization[]> {
+    return this.jobs.find({ userId }, { projection: { _id: 0 } })
+      .sort({ createdAt: -1 }).limit(50).toArray();
   }
 
   /** Atomically excludes duplicate workers; a bounded lease permits restart recovery. */
@@ -146,6 +153,12 @@ export class MemoryAgentJobAuthorizationStore implements AgentJobAuthorizationSt
   private jobs = new Map<string, AgentJobAuthorization>();
 
   async init() {}
+
+  /** Match the bounded, owner-scoped MongoDB history. */
+  async listForUser(userId: string): Promise<AgentJobAuthorization[]> {
+    return structuredClone([...this.jobs.values()].filter(job => job.userId === userId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, 50));
+  }
 
   /** In-memory equivalent of the atomic MongoDB job claim. */
   async claim(jobId: string, userId: string, leaseUntil: Date) {

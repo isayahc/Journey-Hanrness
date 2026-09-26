@@ -6,7 +6,7 @@ import vm from 'node:vm';
 // Exercise the shipped controller, with controllable API replies and a minimal DOM.
 class Element {
   constructor() {
-    Object.assign(this, { hidden: false, disabled: false, value: '', textContent: '', children: [], dataset: {}, className: '' });
+    Object.assign(this, { hidden: false, disabled: false, value: '', textContent: '', children: [], elements: [], dataset: {}, className: '' });
     this.classList = { toggle() {} };
   }
   append(...children) { this.children.push(...children); }
@@ -23,10 +23,11 @@ async function fixture(t) {
   let createGate;
   const fetch = async (path, options = {}) => {
     requests.push({ path, options });
-    if (path === '/api/status') return response({ authEnabled: true, githubAppEnabled: true, githubRepoSyncEnabled: true });
+    if (path === '/api/status') return response({ authEnabled: true, githubAppEnabled: true, githubRepoSyncEnabled: true, agentJobsEnabled: true });
     if (path === '/api/me') return response({ githubLogin: 'ui-test' });
     if (path === '/api/github/installations') return response([{ installationId: 1 }]);
-    if (path === '/api/github/repositories') return response([]);
+    if (path === '/api/github/repositories') return response([{ repositoryId: 1, fullName: 'ui-test/project', agentEnabled: true }]);
+    if (path === '/api/agent-jobs') return response(options.method === 'POST' ? { jobId: 'test-job' } : []);
     if (path === '/api/chats') {
       if (options.method !== 'POST') return response([...chats.values()]);
       if (createGate) await createGate;
@@ -47,11 +48,14 @@ async function fixture(t) {
     if (action === 'cancel') { replies.get(id)?.fail('CHAT_CANCELLED'); return response({ cancelled: true }); }
     return response(chat);
   };
+  get('#agent-job-form').elements = ['#agent-repository', '#agent-instruction', '#submit-agent-job'].map(get);
   const context = vm.createContext({
     document: { querySelector: get, querySelectorAll: () => [], createElement: () => new Element(), createTextNode: text => ({ textContent: text }) },
     fetch, URLSearchParams, AbortSignal, Date, window: { location: { search: '', assign() {} } },
     setInterval(fn, ms) { const id = setInterval(fn, ms); timers.add(id); return id; },
     clearInterval(id) { clearInterval(id); timers.delete(id); },
+    setTimeout(fn, ms) { const id = setTimeout(fn, ms); timers.add(id); return id; },
+    clearTimeout(id) { clearTimeout(id); timers.delete(id); },
   });
   t.after(() => { for (const id of timers) clearInterval(id); });
   vm.runInContext(readFileSync(new URL('../public/app.js', import.meta.url), 'utf8'), context);
@@ -153,4 +157,19 @@ test('a timed-out request has a deadline, requests cancellation, and keeps the d
   assert.equal(ui.get('#message').value, 'Slow reply');
   assert.match(ui.get('#error').textContent, /timed out/);
   assert.ok(ui.requests.some(request => request.path.endsWith('/cancel')));
+});
+
+
+test('repository job controls remain usable while a chat reply is pending', async t => {
+  const ui = await fixture(t);
+  const sent = ui.send('Pending chat'); await tick();
+  await ui.get('#repositories-button').onclick();
+  assert.equal(ui.get('#submit-agent-job').disabled, false);
+  ui.get('#agent-repository').value = '1';
+  ui.get('#agent-instruction').value = 'Add a test';
+  await ui.get('#agent-job-form').onsubmit({ preventDefault() {} });
+  assert.ok(ui.requests.some(request => request.path === '/api/agent-jobs' && request.options.method === 'POST'));
+  await ui.get('#repositories-button').onclick();
+  assert.equal(ui.get('#thinking').hidden, false);
+  ui.replies.get('chat-1').succeed(); await sent;
 });
