@@ -17,6 +17,7 @@ import {
 import type { RepositoryAgent } from "./opencode-repository-agent.js";
 import type {
   GitHubPullRequestClient,
+  GitHubRepositoryInitializer,
   GitHubRepositoryHeadClient,
 } from "../github/app-client.js";
 import type {
@@ -38,7 +39,7 @@ export interface CreateRepositoryJobInput {
 export interface RepositoryExecutionRuntime {
   jobs: AgentJobAuthorizationStore;
   repositories: ConnectedRepositoryStore;
-  github: GitHubRepositoryHeadClient & GitHubPullRequestClient;
+  github: GitHubRepositoryHeadClient & GitHubRepositoryInitializer & GitHubPullRequestClient;
   credentials: AgentGitHubCredentialBroker;
   commands: CommandRunner;
   agent: RepositoryAgent;
@@ -66,6 +67,7 @@ const SAFE_FAILURES = new Set([
   "GITHUB_CREDENTIAL_MINT_FAILED",
   "GITHUB_INSTALLATION_CREDENTIAL_EXPIRED",
   "GITHUB_BRANCH_HEAD_LOOKUP_FAILED",
+  "GITHUB_REPOSITORY_INITIALIZATION_FAILED",
   "AGENT_CLONE_FAILED",
   "AGENT_BASE_CHECKOUT_FAILED",
   "AGENT_BRANCH_CREATE_FAILED",
@@ -169,13 +171,27 @@ export class AgentRepositoryExecutor {
       input.repositoryId,
       "createBranch",
     );
-    const baseSha = await this.runtime.github.getRepositoryBranchHead(
+    let baseSha = await this.runtime.github.getRepositoryBranchHead(
       repository.installationId,
       repository.repositoryId,
       repository.fullName,
       repository.defaultBranch,
     );
-    if (!/^[0-9a-f]{40}$/i.test(baseSha)) throw new Error("AGENT_BASE_COMMIT_REQUIRED");
+    if (!baseSha) {
+      await this.runtime.github.initializeRepository(
+        repository.installationId,
+        repository.repositoryId,
+        repository.fullName,
+        repository.defaultBranch,
+      );
+      baseSha = await this.runtime.github.getRepositoryBranchHead(
+        repository.installationId,
+        repository.repositoryId,
+        repository.fullName,
+        repository.defaultBranch,
+      );
+      if (!baseSha) throw new Error("GITHUB_REPOSITORY_INITIALIZATION_FAILED");
+    }
     const branch = `journey-harness/${jobId}`;
     if (branch === repository.defaultBranch)
       throw new Error("AGENT_BRANCH_CREATE_FAILED");

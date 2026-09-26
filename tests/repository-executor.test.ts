@@ -13,13 +13,16 @@ import type {
   GitHubAppRepositoryClient,
   GitHubPullRequestClient,
   GitHubRepositoryHeadClient,
+  GitHubRepositoryInitializer,
   GitHubInstallationCredentialMinter,
   GitHubInstallationRepository,
 } from "../src/github/app-client.js";
 import { MemoryConnectedRepositoryStore } from "../src/github/repositories.js";
 
-class FakeGitHub implements GitHubAppRepositoryClient, GitHubRepositoryHeadClient, GitHubPullRequestClient, GitHubInstallationCredentialMinter {
+class FakeGitHub implements GitHubAppRepositoryClient, GitHubRepositoryHeadClient, GitHubRepositoryInitializer, GitHubPullRequestClient, GitHubInstallationCredentialMinter {
   mints = 0;
+  empty = false;
+  initialized = 0;
   pullRequests: Array<{
     installationId: number;
     repositoryId: number;
@@ -28,7 +31,8 @@ class FakeGitHub implements GitHubAppRepositoryClient, GitHubRepositoryHeadClien
   }> = [];
 
   async listInstallationRepositories(): Promise<GitHubInstallationRepository[]> { return []; }
-  async getRepositoryBranchHead() { return "a".repeat(40); }
+  async getRepositoryBranchHead() { return this.empty && !this.initialized ? null : "a".repeat(40); }
+  async initializeRepository() { this.initialized++; }
   async mintRepositoryCredential() {
     this.mints++;
     return { token: `token-${this.mints}`, expiresAt: new Date(Date.now() + 60 * 60 * 1000) };
@@ -160,6 +164,21 @@ test("job records base metadata, pushes only its agent branch, and opens a revie
 
   assert.equal(state.agent.workspaces.length, 1);
   await assert.rejects(access(state.agent.workspaces[0]!));
+});
+
+test("empty repositories are initialized on their default branch before the agent job is created", async () => {
+  const state = await fixture();
+  state.github.empty = true;
+
+  const job = await state.executor.createJob({
+    userId: "alice",
+    repositoryId: 101,
+    instruction: "Create the project",
+  });
+
+  assert.equal(state.github.initialized, 1);
+  assert.equal(job.baseSha, "a".repeat(40));
+  assert.equal((await state.executor.execute(job, "Create the project"))?.status, "completed");
 });
 
 test("git credentials are passed only to clone/push process environment and never arguments", async () => {

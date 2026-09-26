@@ -19,6 +19,7 @@ import type {
   GitHubInstallationRepository,
   GitHubPullRequestClient,
   GitHubRepositoryHeadClient,
+  GitHubRepositoryInitializer,
 } from "../src/github/app-client.js";
 import { MemoryGitHubInstallationStore } from "../src/github/installations.js";
 import { MemoryConnectedRepositoryStore } from "../src/github/repositories.js";
@@ -52,6 +53,7 @@ class NoopVerifier implements GitHubInstallationVerifier {
 class FakeGitHub implements
   GitHubAppRepositoryClient,
   GitHubRepositoryHeadClient,
+  GitHubRepositoryInitializer,
   GitHubPullRequestClient,
   GitHubInstallationCredentialMinter {
   pullRequests: Array<{
@@ -74,6 +76,8 @@ class FakeGitHub implements
   async getRepositoryBranchHead() {
     return "a".repeat(40);
   }
+
+  async initializeRepository() {}
 
   async mintRepositoryCredential() {
     return {

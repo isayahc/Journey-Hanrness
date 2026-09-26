@@ -33,6 +33,7 @@ export async function chatJobsFixture(chats: ChatStore = new MemoryChatStore(), 
   } };
   const github = {
     async getRepositoryBranchHead() { await state.headGate; return state.emptyHead ? '' : 'a'.repeat(40); },
+    async initializeRepository() { state.emptyHead = false; },
     async mintRepositoryCredential() { return { token: 'private-test-token', expiresAt: new Date(Date.now() + 3600000) }; },
     async createRepositoryPullRequest() { state.prs++; return { number: 42, url: 'https://github.com/alice/app/pull/42' }; },
   };

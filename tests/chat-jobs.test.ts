@@ -68,7 +68,7 @@ test('server rejects model-selected inaccessible, disabled, disconnected, suspen
   }
 });
 
-test('missing Daytona never falls back to the host; an unusable base commit becomes a saved actionable error', async () => {
+test('missing Daytona never falls back to the host; an empty repository is initialized before execution', async () => {
   const f = await chatJobsFixture();
   const executor = f.runtime.repositoryExecutor;
   f.runtime.repositoryExecutor = undefined;
@@ -78,9 +78,9 @@ test('missing Daytona never falls back to the host; an unusable base commit beco
   assert.equal(f.state.opens, 0);
   f.runtime.repositoryExecutor = executor; f.state.emptyHead = true;
   await f.send('Try again');
-  const chat = await eventually(() => saved(f), chat => chat.jobs[0]?.status === 'submission_failed');
-  assert.match(chat.jobs[0].failure, /base commit.*README/);
-  assert.equal(f.state.opens, 0);
+  const chat = await eventually(() => saved(f), chat => chat.jobs[0]?.status === 'completed');
+  assert.equal(chat.jobs[0].failure, undefined);
+  assert.equal(f.state.opens, 1);
 });
 
 test('durable outbox survives a crash before dispatch and concurrent recovery creates exactly one job', async () => {

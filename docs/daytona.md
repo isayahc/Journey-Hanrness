@@ -28,16 +28,21 @@ login files and provider secrets are not copied into sandboxes; use a model
 available without those host credentials. Credentialed provider provisioning is
 not part of this increment.
 
-The authorized repository is cloned at its recorded base SHA. All agent edits,
-package reads, dependency installation, and check commands run remotely. For npm
+The authorized repository is cloned at its recorded base SHA. If the GitHub
+repository is empty, the application first creates a minimal
+`.journey-harness/.gitkeep` bootstrap commit on the configured default branch,
+then uses that commit as the job base. All agent edits, package reads,
+dependency installation, and check commands run remotely. For npm
 projects with check/test/build scripts, dependencies are installed with `npm ci`
 when a lockfile exists, or `npm install --package-lock=false` otherwise. Checks
 run in order and stop on failure. Other project check systems remain unchanged
 from the existing executor and are not auto-detected.
 
-Only the dedicated `journey-harness/<job-id>` branch is pushed. Workflow edits
-remain subject to repository policy. The executor opens a PR and never merges it
-or pushes the default branch. The owner-scoped MongoDB job retains check results,
+Only the dedicated `journey-harness/<job-id>` branch is pushed by the agent
+executor. Empty-repository bootstrap is the sole exception and creates only the
+minimal marker commit described above. Workflow edits remain subject to
+repository policy. The executor opens a PR and never merges it. The owner-scoped
+MongoDB job retains check results,
 a bounded command metadata log, summary, commit SHA, and review artifact references
 (PR files and job checks). Raw output, command arguments, model server logs,
 GitHub tokens, and preview credentials are not persisted as command logs.
