@@ -8,8 +8,8 @@ and the existing MongoDB/GitHub App configuration described in
 include Node.js 22+, npm, Git, a POSIX shell, and `nohup`.
 
 Keep `JOURNEY_AGENT_EXECUTION_BACKEND=local` for explicit host development.
-An unknown backend or missing Daytona key fails startup; it never falls back
-to local execution. Existing installations default to local for compatibility.
+An unknown backend or missing Daytona key disables execution and surfaces a
+configuration error in chat; it never falls back to local execution. Existing installations default to local for compatibility.
 Daytona jobs still require GitHub sign-in, a connected installation, repository
 opt-in, and the existing per-action write policy.
 
@@ -73,15 +73,15 @@ can be safely rebuilt. After that checkpoint, a missing/expired workspace fails
 closed rather than discarding progress. Local workspaces are deleted at completion
 or failure and do not support checkpoint recovery.
 
-Checkpoints cover checkout, edits, commit, push intent/result, and PR intent/result.
+Checkpoints cover checkout, scaffolding, edits, commit, push intent/result, and PR intent/result.
 Saved edits do not rerun the model; saved commits do not rerun checks or commit.
 An uncertain push must match the saved commit on GitHub before proceeding. An
 uncertain PR request queries all PR states by its unique job branch and base;
 a matching PR is reused. Failed lookups or a different remote head return
 `AGENT_RECOVERY_REQUIRES_RECONCILIATION` and never blindly push again. If a local
 commit finishes before its checkpoint is saved, recovery may require inspection;
-it does not fabricate success. There is no automatic background retry/reaper in
-this increment; owner resume plus provider TTL handle interrupted jobs.
+it does not fabricate success. Unclaimed chat submissions are recovered automatically from the conversation outbox.
+Running or failed jobs require owner resume; provider TTL handles abandoned sandboxes.
 
 ## Verification
 
@@ -115,3 +115,90 @@ PR, disconnect the worker after GitHub accepts the request and verify resume fin
 the existing PR without creating another.
 
 SDK reference: https://www.daytona.io/docs/en/typescript-sdk/
+
+## Starting work from chat
+
+After signing in, connect a repository, sync it and enable **Agent access** in
+Repositories. Ask, for example, “Create a Next.js app in alice/disposable-app” or
+“Update the welcome page in alice/existing-app.” The repository must have a
+usable default-branch commit; a README-only initialization is sufficient. Chat
+asks for a target when it is ambiguous. Repository lists and ordinary discussion
+do not create jobs. **Chat execution always requires Daytona**, even if the
+separate repository-job form is configured for local development.
+
+The conversational model returns a validated structured decision. The server
+resolves repository identity from current owner-scoped records, rechecks active
+installation, opt-in and write policies, and atomically appends the user message
+and assistant job receipt. That append is a MongoDB outbox: a stable job ID and
+message request ID are saved before execution. The server dispatches immediately
+and checks pending receipts every five seconds and on startup. A database-unique
+job ID plus the existing atomic worker claim prevents repeated deliveries from
+provisioning another sandbox. A failed submission remains visible with an
+explanation; fix the problem and send a new request.
+
+The browser supplies a UUID request ID to `POST /api/chats/<id>/messages` and keeps
+it in tab session storage across retries/reloads. Reusing it with the same message
+returns the saved conversation; different content returns 409. API integrations
+must retain and reuse their request ID for retry safety. The field is optional
+for older callers, which do not get this retry guarantee. The chat append uses an
+optimistic version check so competing turns cannot both be committed.
+
+Job cards read saved job status, checkpoints, install/check results, summary and
+PR link through `GET /api/chats/<id>/jobs`. They survive reload and server restart;
+the other conversations remain usable. **Stop reply** stops only the conversational
+model before its receipt is saved. **Cancel job** cancels the specific submitted
+job through the existing owner-scoped endpoint, including the brief interval
+before its GitHub base lookup completes. **Resume job** uses the saved job,
+workspace and branch after a failure or an expired worker lease.
+
+## Controlled Next.js setup
+
+A structured `scaffold: {framework: "nextjs", directory: "."}` action runs a fixed
+`create-next-app@16.3.6` invocation in Daytona with TypeScript, App Router, Tailwind,
+ESLint, npm, `--yes`, `--skip-install` and `--disable-git`. Package name, version,
+flags and command text cannot be supplied by the model. The chat agent still has
+no shell/write tools, and the repository agent retains its existing read-only Git
+shell allowlist. CLI reference: https://nextjs.org/docs/app/api-reference/cli/create-next-app
+
+Setup accepts `.` or ordinary relative directories such as `apps/web`. Absolute
+paths, traversal, hidden path components, symlinks and shell metacharacters are
+rejected. It generates outside the checkout, then copies into a directory
+containing only Git metadata, README/license and ignore files. It preserves the
+existing README/license and appends the template's ignore rules. Existing app
+files cause a conflict rather than an overwrite; choose a new directory or ask
+for an edit instead. An atomic merge-intent file makes interrupted copying
+replayable. After setup the repository model customizes the files, and the
+existing dependency/check pipeline runs in the selected app directory. Creating
+new GitHub repositories and arbitrary scaffolding commands are outside this flow.
+
+## Live chat-to-PR smoke test
+
+The automated unit/integration/browser suites use fake OpenCode, GitHub and
+sandbox services. The MongoDB tests use a real disposable database in CI. These
+tests do **not** establish that a live Daytona account/model is available.
+
+For a real smoke test, use a disposable GitHub repository initialized with only
+a README. Connect and enable it in the running application configured above.
+Set these variables in your local test environment (do not commit or share the
+session cookie):
+
+```sh
+JOURNEY_SMOKE_ORIGIN=http://localhost:3000
+JOURNEY_SMOKE_REPOSITORY=your-account/disposable-app
+JOURNEY_SMOKE_SESSION=<your authenticated journey_session cookie>
+CHAT_DAYTONA_LIVE_TEST=1
+```
+
+Then run with those variables exported, or in a private env file:
+
+```sh
+node --env-file=.env --import tsx --test tests/chat-daytona-live.test.ts
+```
+
+This sends the request through the real chat endpoint, retries the same request
+ID, checks that exactly one linked job exists, and waits for a Daytona sandbox ID,
+passing production build, PR link, deleted sandbox and persisted conversation.
+It creates a branch and PR and may incur costs. It cancels an unfinished job on
+failure; review and close the smoke PR afterward. Do not merge it automatically.
+Also exercise failed-check/resume and restart-after-lease-expiry scenarios described
+above. No live verification is claimed merely because the opt-in tests are present.

@@ -26,7 +26,7 @@ test('chat receives only the current user’s active, synced repositories and re
     const request = new Request(input, init);
     if (new URL(request.url).pathname.endsWith('/message')) {
       prompts.push(await request.json());
-      return Response.json({ info: {}, parts: [{ type: 'text', text: 'Repository summary' }] });
+      return Response.json({ info: { structured: { content: 'Repository summary', execution: null } }, parts: [] });
     }
     return Response.json({ id: 'owner-session' });
   });

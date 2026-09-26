@@ -1,3 +1,5 @@
+import { scaffoldInput, type ScaffoldInput } from "../chat/execution.js";
+import { scaffoldNextApp } from "./scaffold.js";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
@@ -27,6 +29,10 @@ export interface CreateRepositoryJobInput {
   userId: string;
   repositoryId: number;
   instruction: string;
+  jobId?: string;
+  scaffold?: ScaffoldInput;
+  chat?: { id: string; requestId: string };
+  executionBackend?: "daytona";
 }
 
 export interface RepositoryExecutionRuntime {
@@ -41,6 +47,10 @@ export interface RepositoryExecutionRuntime {
 }
 
 const SAFE_FAILURES = new Set([
+  "DAYTONA_REQUIRED",
+  "AGENT_SCAFFOLD_FAILED",
+  "AGENT_SCAFFOLD_CONFLICT",
+  "AGENT_SCAFFOLD_PATH_DENIED",
   "AGENT_JOB_NOT_AUTHORIZED",
   "AGENT_RECOVERY_REQUIRES_RECONCILIATION",
   "AGENT_WORKSPACE_RECOVERY_REQUIRED",
@@ -108,6 +118,7 @@ function oneLine(value: string, limit: number) {
 
 export class AgentRepositoryExecutor {
   private workspaceRoot: string;
+  get backend() { return this.runtime.environment?.backend || "local"; }
 
   constructor(private runtime: RepositoryExecutionRuntime) {
     this.workspaceRoot = resolve(
@@ -137,6 +148,20 @@ export class AgentRepositoryExecutor {
   }
 
   async createJob(input: CreateRepositoryJobInput) {
+    if (input.executionBackend === "daytona" && this.backend !== "daytona") throw new Error("DAYTONA_REQUIRED");
+    const scaffold = input.scaffold ? scaffoldInput.parse(input.scaffold) : undefined;
+    if (scaffold && this.backend !== "daytona") throw new Error("DAYTONA_REQUIRED");
+    const jobId = input.jobId || randomUUID();
+    if (!/^[0-9a-f-]{36}$/.test(jobId)) throw new Error("AGENT_JOB_NOT_AUTHORIZED");
+    const existing = await this.runtime.jobs.get(jobId, input.userId);
+    const verifyExisting = (job: AgentJobAuthorization) => {
+      if (job.repositoryId !== input.repositoryId || job.request !== input.instruction.trim()
+        || JSON.stringify(job.scaffold) !== JSON.stringify(scaffold)
+        || JSON.stringify(job.chat) !== JSON.stringify(input.chat)
+        || job.executionBackend !== input.executionBackend) throw new Error("AGENT_JOB_NOT_AUTHORIZED");
+      return job;
+    };
+    if (existing) return verifyExisting(existing);
     if (!input.instruction.trim() || input.instruction.length > 12_000)
       throw new Error("INVALID_AGENT_INSTRUCTION");
     const repository = await this.requirePolicy(
@@ -150,17 +175,23 @@ export class AgentRepositoryExecutor {
       repository.fullName,
       repository.defaultBranch,
     );
-    const jobId = randomUUID();
+    if (!/^[0-9a-f]{40}$/i.test(baseSha)) throw new Error("AGENT_BASE_COMMIT_REQUIRED");
     const branch = `journey-harness/${jobId}`;
     if (branch === repository.defaultBranch)
       throw new Error("AGENT_BRANCH_CREATE_FAILED");
-    return this.runtime.jobs.create(jobId, input.userId, input.repositoryId, {
+    try { return await this.runtime.jobs.create(jobId, input.userId, input.repositoryId, {
       repositoryFullName: repository.fullName,
       defaultBranch: repository.defaultBranch,
       baseSha,
       branch,
       request: input.instruction.trim(),
-    });
+      ...(scaffold ? { scaffold } : {}), ...(input.chat ? { chat: input.chat } : {}),
+      ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
+    }); } catch (error) {
+      const concurrent = await this.runtime.jobs.get(jobId, input.userId);
+      if (concurrent) return verifyExisting(concurrent);
+      throw error;
+    }
   }
 
   private workspace(jobId: string) {
@@ -195,6 +226,7 @@ export class AgentRepositoryExecutor {
       failure: undefined,
     });
     try {
+      if (job.executionBackend === "daytona" && this.backend !== "daytona") throw new Error("DAYTONA_REQUIRED");
       if (
         !job.repositoryFullName ||
         !job.defaultBranch ||
@@ -330,8 +362,14 @@ export class AgentRepositoryExecutor {
         });
       }
       const cleanEnv = await session.environment(workspace);
-      if (!job.checkpoint || job.checkpoint === "workspace") {
-        await session.agent.modify(workspace, request);
+      if ((!job.checkpoint || job.checkpoint === "workspace") && job.scaffold) {
+        if (this.backend !== "daytona") throw new Error("DAYTONA_REQUIRED");
+        await scaffoldNextApp(session, job.jobId, job.scaffold);
+        await this.runtime.jobs.updateExecution(job.jobId, job.userId, { checkpoint: "scaffolded" });
+      }
+      if (!job.checkpoint || ["workspace", "scaffolded"].includes(job.checkpoint)) {
+        const setup = job.scaffold ? `\nThe harness has scaffolded Next.js in ${job.scaffold.directory}. Customize those files for this request. Do not run setup commands; dependencies and checks run afterward.` : "";
+        await session.agent.modify(workspace, request + setup);
         await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
           checkpoint: "modified",
         });
@@ -357,7 +395,7 @@ export class AgentRepositoryExecutor {
 
       let checks = job.checks || [];
       if (!["committed", "pushed"].includes(job.checkpoint || "")) {
-        checks = await this.runChecks(session, cleanEnv);
+        checks = await this.runChecks(session, cleanEnv, job.scaffold?.directory);
         await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
           checks,
         });
@@ -619,8 +657,9 @@ export class AgentRepositoryExecutor {
   private async runChecks(
     session: ExecutionWorkspace,
     env: Record<string, string>,
+    directory = ".",
   ) {
-    const workspace = session.path;
+    const workspace = directory === "." ? session.path : `${session.path}/${directory}`;
     const commands = session.commands;
     const checks: Array<{ command: string; ok: boolean }> = [];
     let packageJson: { scripts?: Record<string, string> } | undefined;
@@ -635,8 +674,10 @@ export class AgentRepositoryExecutor {
         throw new Error("AGENT_CHECK_FAILED");
     }
     const scripts = packageJson?.scripts || {};
-    if (["check", "test", "build"].some((name) => scripts[name]))
-      await session.prepareChecks?.();
+    if (["check", "test", "build"].some((name) => scripts[name])) {
+      const install = await session.prepareChecks?.(workspace);
+      if (install) { checks.push(install); if (!install.ok) return checks; }
+    }
     for (const [name, args] of [
       ["check", ["run", "check"]],
       ["test", ["test"]],

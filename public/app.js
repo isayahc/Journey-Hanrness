@@ -1,4 +1,6 @@
 const $ = selector => document.querySelector(selector);
+$('#stop').hidden = true;
+$('#stop').disabled = true;
 let current = null;
 let initializing = true;
 let loadingChat = false;
@@ -18,6 +20,28 @@ let jobPending = false;
 let jobsLoading = false;
 let jobsTimer;
 let enabledRepositories = [];
+let chatJobsTimer;
+let chatJobsVersion = 0;
+const retryMessages = new Map();
+function retryMessage(id) {
+  if (!id) return null;
+  if (retryMessages.has(id)) return retryMessages.get(id);
+  try { return JSON.parse(window.sessionStorage?.getItem(`journey-send-${id}`) || 'null'); } catch { return null; }
+}
+function saveRetry(id, value) {
+  if (!id) return;
+  if (value) retryMessages.set(id, value); else retryMessages.delete(id);
+  try {
+    if (value) window.sessionStorage?.setItem(`journey-send-${id}`, JSON.stringify(value));
+    else window.sessionStorage?.removeItem(`journey-send-${id}`);
+  } catch { /* In-memory retry IDs still work if browser storage is disabled. */ }
+}
+function requestId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+  const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 
 async function api(path, body, timeout = 15000) {
@@ -60,9 +84,29 @@ function renderMessage(message, pending = false) {
   const speaker = document.createElement('span');
   speaker.className = 'speaker'; speaker.textContent = message.role === 'user' ? 'YOU' : 'journey-harness';
   article.append(speaker, document.createTextNode(message.content));
+  if (message.job) {
+    const job = current?.jobs?.find(item => item.jobId === message.job.jobId) || {
+      jobId: message.job.jobId, repositoryFullName: message.job.repositoryFullName,
+      status: message.job.error ? 'submission_failed' : 'queued', failure: message.job.error,
+    };
+    const chatId = current.id;
+    const card = renderJobCard(job, (jobId, action) => actOnChatJob(chatId, jobId, action));
+    const link = document.createElement('button'); link.type = 'button'; link.className = 'text-button'; link.textContent = 'View repository jobs';
+    link.onclick = async () => { setRepositoryMode(true); await loadRepositories().catch(jobError); };
+    card.append(link); article.append(card);
+  }
   $('#messages').append(article);
 }
 function render() {
+  ++chatJobsVersion;
+  const retry = retryMessage(current?.id);
+  if (retry && !pendingReplies.has(activeKey)) {
+    if (current.messages.some(message => message.requestId === retry.requestId)) saveRetry(current.id, null);
+    else if (!drafts.has(activeKey)) {
+      drafts.set(activeKey, retry.content);
+      chatErrors.set(activeKey, 'The previous reply was interrupted. Your message is ready to retry with the same request ID.');
+    }
+  }
   $('#messages').replaceChildren();
   for (const message of current?.messages || []) renderMessage(message);
   const pending = pendingReplies.get(activeKey);
@@ -72,6 +116,7 @@ function render() {
   $('#error').hidden = !chatErrors.has(activeKey);
   $('#error').textContent = chatErrors.get(activeKey) || '';
   updateControls();
+  scheduleChatJobs();
 }
 function setAuthBlocked(value, message) {
   authBlocked = value;
@@ -92,6 +137,7 @@ function setRepositoryMode(value) {
   $('#workspace-title').textContent = value ? 'Repositories' : 'Chat';
   $('#repositories-button').textContent = value ? '← Back to chat' : 'Repositories';
   clearTimeout(jobsTimer);
+  clearTimeout(chatJobsTimer); ++chatJobsVersion;
   if (!value) render();
 }
 async function refreshHistory() {
@@ -266,7 +312,8 @@ $('#composer').onsubmit = async event => {
   if (!content || initializing || loadingChat || authBlocked || pendingReplies.has(activeKey)) return;
   let key = activeKey;
   let chat = current;
-  const operation = { content, chatId: chat?.id, startedAt: Date.now(), stopping: false };
+  const retry = retryMessage(chat?.id);
+  const operation = { content, requestId: retry?.content === content ? retry.requestId : requestId(), chatId: chat?.id, startedAt: Date.now(), stopping: false };
   pendingReplies.set(key, operation);
   drafts.set(key, '');
   chatErrors.delete(key);
@@ -284,7 +331,9 @@ $('#composer').onsubmit = async event => {
       key = chat.id;
       void refreshHistory().catch(() => {});
     }
-    const result = await api(`/api/chats/${chat.id}/messages`, { content }, 105000);
+    saveRetry(chat.id, { requestId: operation.requestId, content });
+    const result = await api(`/api/chats/${chat.id}/messages`, { content, requestId: operation.requestId }, 105000);
+    saveRetry(chat.id, null);
     if (activeKey === key) current = result;
   } catch (error) {
     let recovered = false;
@@ -293,11 +342,13 @@ $('#composer').onsubmit = async event => {
       await api(`/api/chats/${chat.id}/cancel`, {}).catch(() => {});
       try {
         const latest = await api(`/api/chats/${chat.id}`);
-        recovered = latest.version > chat.version;
+        recovered = latest.messages.some(message => message.requestId === operation.requestId);
+        if (recovered) saveRetry(chat.id, null);
         if (activeKey === key) current = latest;
       } catch { /* Keep the user's draft if recovery is unavailable. */ }
     }
     if (!recovered) {
+      if (error.code === 'CHAT_CANCELLED') saveRetry(chat?.id, null);
       drafts.set(key, content);
       chatErrors.set(key, error.code === 'CHAT_CANCELLED'
         ? 'Reply stopped. Your message is ready to send again.'
@@ -413,37 +464,80 @@ function renderAgentJobs(jobs) {
   const list = $('#agent-job-list');
   list.replaceChildren();
   if (!jobs.length) { list.textContent = 'No agent jobs yet.'; return; }
-  for (const job of jobs) {
-    const card = document.createElement('article'); card.className = 'agent-job-card';
-    const heading = document.createElement('h4'); heading.textContent = job.repositoryFullName || `Repository ${job.repositoryId}`;
-    card.append(heading);
-    for (const text of [job.request, `Status: ${job.status} · Checkpoint: ${job.checkpoint || 'Not started'}`, `Job: ${job.jobId}`, job.branch && `Branch: ${job.branch}`, job.summary && `Summary: ${job.summary}`, job.failure && `Failure: ${job.failure}`]) {
-      if (!text) continue;
-      const paragraph = document.createElement('p'); paragraph.textContent = text; card.append(paragraph);
-    }
-    const checks = document.createElement('ul');
-    for (const check of job.checks || []) {
-      const item = document.createElement('li'); item.textContent = `${check.ok ? 'PASS' : 'FAIL'}: ${check.command}`; checks.append(item);
-    }
-    if (!checks.children.length) { const item = document.createElement('li'); item.textContent = 'No checks reported yet.'; checks.append(item); }
-    card.append(checks);
-    if (job.pullRequestUrl && /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(job.pullRequestUrl)) {
-      const link = document.createElement('a'); link.href = job.pullRequestUrl; link.textContent = 'View pull request'; link.target = '_blank'; link.rel = 'noopener noreferrer'; card.append(link);
-    }
-    const active = ['queued', 'running', 'failed'].includes(job.status);
-    if (active) {
-      const actions = document.createElement('div'); actions.className = 'repo-actions';
-      for (const action of ['resume', 'cancel']) {
-        if (action === 'resume' && job.leaseUntil && new Date(job.leaseUntil) > new Date()) continue;
-        const button = document.createElement('button'); button.type = 'button'; button.dataset.jobAction = action;
-        button.textContent = action === 'resume' ? 'Resume job' : 'Cancel job';
-        button.onclick = () => actOnJob(job.jobId, action); actions.append(button);
-      }
-      card.append(actions);
-    }
-    list.append(card);
-  }
+  for (const job of jobs) list.append(renderJobCard(job, actOnJob));
   updateJobControls();
+}
+function jobFailure(code) {
+  return {
+    AGENT_SCAFFOLD_CONFLICT: 'Setup found existing application files. Choose an empty subdirectory or ask to edit the existing app.',
+    AGENT_SCAFFOLD_PATH_DENIED: 'Setup refused an unsafe directory or symlink. Choose a normal directory within this repository.',
+    AGENT_SCAFFOLD_FAILED: 'Next.js setup failed. Check sandbox package access, then resume this job.',
+    AGENT_CHECK_FAILED: 'Dependency installation or a repository check failed. Review the reported checks before resuming.',
+    OPENCODE_REPOSITORY_JOB_FAILED: 'The repository model failed. Check model availability and credentials, then resume.',
+    DAYTONA_REQUIRED: 'This job requires Daytona. Restore the Daytona configuration before resuming.',
+    AGENT_POLICY_DENIED: 'Repository access or its write policy changed. Restore agent access before resuming.',
+    SANDBOX_RUNTIME_FAILED: 'The sandbox runtime could not start. Check Daytona connectivity and model configuration.',
+    SANDBOX_EXPIRED: 'The saved sandbox expired. Start a new request after reviewing any existing branch or PR.',
+  }[code] || code;
+}
+function renderJobCard(job, onAction) {
+  const card = document.createElement('article'); card.className = 'agent-job-card'; card.dataset.jobId = job.jobId;
+  const heading = document.createElement('h4'); heading.textContent = job.repositoryFullName || `Repository ${job.repositoryId}`;
+  card.append(heading);
+  for (const text of [job.request, `Status: ${job.status} · Checkpoint: ${job.checkpoint || 'Not started'}`, `Job: ${job.jobId}`, job.branch && `Branch: ${job.branch}`, job.summary && `Summary: ${job.summary}`, job.failure && `Failure: ${jobFailure(job.failure)}`]) {
+    if (!text) continue;
+    const paragraph = document.createElement('p'); paragraph.textContent = text; card.append(paragraph);
+  }
+  const checks = document.createElement('ul');
+  for (const check of job.checks || []) {
+    const item = document.createElement('li'); item.textContent = `${check.ok ? 'PASS' : 'FAIL'}: ${check.command}`; checks.append(item);
+  }
+  if (!checks.children.length) { const item = document.createElement('li'); item.textContent = 'No checks reported yet.'; checks.append(item); }
+  card.append(checks);
+  if (job.pullRequestUrl && /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(job.pullRequestUrl)) {
+    const link = document.createElement('a'); link.href = job.pullRequestUrl; link.textContent = 'View pull request'; link.target = '_blank'; link.rel = 'noopener noreferrer'; card.append(link);
+  }
+  const active = ['queued', 'running', 'failed'].includes(job.status);
+  if (active) {
+    const actions = document.createElement('div'); actions.className = 'repo-actions';
+    for (const action of ['resume', 'cancel']) {
+      if (action === 'resume' && ((!job.createdAt && job.status === 'queued') || (job.leaseUntil && new Date(job.leaseUntil) > new Date()))) continue;
+      const button = document.createElement('button'); button.type = 'button'; button.dataset.jobAction = action;
+      button.textContent = action === 'resume' ? 'Resume job' : 'Cancel job';
+      button.onclick = () => onAction(job.jobId, action); actions.append(button);
+    }
+    card.append(actions);
+  }
+  return card;
+}
+function scheduleChatJobs() {
+  clearTimeout(chatJobsTimer);
+  if (!repositoryMode && !authBlocked && current?.messages.some(message => message.job)
+    && current.jobs?.some(job => ['queued', 'running'].includes(job.status))) {
+    chatJobsTimer = setTimeout(loadChatJobs, 3000);
+  }
+}
+async function loadChatJobs() {
+  const id = current?.id, version = ++chatJobsVersion;
+  if (!id || repositoryMode || authBlocked) return;
+  try {
+    const jobs = await api(`/api/chats/${id}/jobs`);
+    if (current?.id !== id || version !== chatJobsVersion || repositoryMode) return;
+    if (JSON.stringify(current.jobs) !== JSON.stringify(jobs)) { current.jobs = jobs; render(); }
+  } catch (error) {
+    if (current?.id === id && version === chatJobsVersion) { chatErrors.set(id, `Job updates unavailable: ${error.message}`); showError(new Error(chatErrors.get(id))); }
+  } finally { if (current?.id === id && version === chatJobsVersion) scheduleChatJobs(); }
+}
+async function actOnChatJob(chatId, jobId, action) {
+  if (jobPending || initializing || authBlocked || current?.id !== chatId) return;
+  jobPending = true; updateJobControls();
+  try {
+    await api(`/api/agent-jobs/${jobId}/${action}`, {});
+    if (current?.id === chatId) await loadChatJobs();
+  } catch (error) {
+    chatErrors.set(chatId, error.message);
+    if (current?.id === chatId) showError(error);
+  } finally { jobPending = false; updateJobControls(); }
 }
 /** Fetch persisted owner-scoped history without overlapping polling requests. */
 async function loadAgentJobs() {

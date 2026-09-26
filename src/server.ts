@@ -77,8 +77,10 @@ async function main() {
         ? new AgentGitHubCredentialBroker(agentJobStore, repositoryStore, repositoryClient)
         : undefined;
       const executionEnabled = process.env.JOURNEY_AGENT_EXECUTION_ENABLED === "1";
-      const repositoryExecutor = executionEnabled && repositoryClient && credentialBroker
-        ? new AgentRepositoryExecutor({
+      let repositoryExecutor: AgentRepositoryExecutor | undefined;
+      let executionError: string | undefined;
+      try {
+        if (executionEnabled && repositoryClient && credentialBroker) repositoryExecutor = new AgentRepositoryExecutor({
             jobs: agentJobStore,
             repositories: repositoryStore,
             github: repositoryClient,
@@ -87,8 +89,11 @@ async function main() {
             agent: new OpenCodeRepositoryAgent(),
             workspaceRoot: process.env.JOURNEY_AGENT_WORKSPACE_ROOT,
             environment: executionEnvironmentFromEnv(),
-          })
-        : undefined;
+          });
+      } catch {
+        executionError = "Repository execution is unavailable. Check JOURNEY_AGENT_EXECUTION_BACKEND and DAYTONA_API_KEY, then restart the server.";
+        console.error("[agent-job] execution configuration invalid");
+      }
       const webhookSecret = githubWebhookSecretFromEnv();
       const webhookDeliveries = db
         ? new MongoGitHubWebhookDeliveryStore(db.githubWebhookDeliveries)
@@ -108,6 +113,7 @@ async function main() {
         credentialBroker,
         jobStore: agentJobStore,
         repositoryExecutor,
+        executionError,
         webhook: webhookSecret ? {
           secret: webhookSecret,
           deliveries: webhookDeliveries,
@@ -122,6 +128,17 @@ async function main() {
   }
 
   const app = createChatApp(store, provider, demo, port, auth, origin.origin, githubApp, runs, search);
+  let recovering = false;
+  const recoverJobs = async () => {
+    if (recovering) return;
+    recovering = true;
+    try { await app.recoverJobs(); }
+    catch { console.error("[chat-jobs] Recovery deferred; check database connectivity."); }
+    finally { recovering = false; }
+  };
+  void recoverJobs();
+  const recoveryTimer = setInterval(() => { void recoverJobs(); }, 5000);
+  recoveryTimer.unref();
   const allowedHosts = new Set([origin.host]);
   if (origin.protocol === "http:" && ["localhost", "127.0.0.1"].includes(origin.hostname)) {
     const localPort = origin.port || String(port);
@@ -159,6 +176,7 @@ async function main() {
   server.listen(port, "127.0.0.1", () => console.log(`journey-harness: ${origin.origin}${demo ? " (demo: no AI, temporary history)" : " (OpenCode + MongoDB)"}${auth ? " · GitHub auth enabled" : " · local anonymous mode"}${githubApp ? " · GitHub App install enabled" : ""}${githubApp?.repositoryClient ? " · repo sync enabled" : ""}${githubApp?.credentialBroker ? " · agent credentials enabled" : ""}${githubApp?.repositoryExecutor ? " · agent execution enabled" : ""}${githubApp?.webhook ? " · webhook enabled" : ""}`));
   server.on("error", async () => { console.error("Cannot start server. Check that PORT is available."); await db?.client.close(); process.exitCode = 1; });
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => {
+    clearInterval(recoveryTimer);
     server.close(() => { void db?.client.close(); });
   });
 }
