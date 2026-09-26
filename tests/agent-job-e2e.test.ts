@@ -41,10 +41,10 @@ class NoopVerifier implements GitHubInstallationVerifier {
     return url.toString();
   }
 
-  async verifyInstallationCode(_code: string, _callbackUrl: string, _installationId: number) {
+  async verifyInstallationCode(_code: string, _callbackUrl: string, _installationId: number | null) {
     return {
       profile: { id: 100, login: "alice" },
-      installation: null,
+      installations: [],
     };
   }
 }

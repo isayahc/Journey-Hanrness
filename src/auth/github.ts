@@ -15,6 +15,7 @@ const installationAccount = z.object({
 });
 const installation = z.object({
   id: z.number().int().positive(),
+  app_slug: z.string().min(1),
   account: installationAccount,
   repository_selection: z.enum(["all", "selected"]),
   permissions: z.record(z.string()),
@@ -41,9 +42,9 @@ export interface GitHubOAuthClient {
 
 export interface GitHubInstallationVerifier {
   installationAuthorizationUrl(state: string, callbackUrl: string): string;
-  verifyInstallationCode(code: string, callbackUrl: string, installationId: number): Promise<{
+  verifyInstallationCode(code: string, callbackUrl: string, installationId: number | null, appSlug: string): Promise<{
     profile: GitHubProfile;
-    installation: VerifiedGitHubInstallation | null;
+    installations: VerifiedGitHubInstallation[];
   }>;
 }
 
@@ -106,12 +107,11 @@ export class GitHubOAuth implements GitHubOAuthClient, GitHubInstallationVerifie
     return this.fetchProfile(accessToken);
   }
 
-  async verifyInstallationCode(code: string, callbackUrl: string, installationId: number) {
+  async verifyInstallationCode(code: string, callbackUrl: string, installationId: number | null, appSlug: string) {
     const accessToken = await this.exchangeAccessToken(code, callbackUrl);
     const profile = await this.fetchProfile(accessToken);
-    let page = 1;
-    let match: z.infer<typeof installation> | undefined;
-    while (page <= 100 && !match) {
+    const verified: VerifiedGitHubInstallation[] = [];
+    for (let page = 1; page <= 100; page++) {
       const response = await this.request(`https://api.github.com/user/installations?per_page=100&page=${page}`, {
         headers: {
           Accept: "application/vnd.github+json",
@@ -121,21 +121,24 @@ export class GitHubOAuth implements GitHubOAuthClient, GitHubInstallationVerifie
       });
       if (!response.ok) throw new Error("GitHub installation lookup failed");
       const payload = installationsResponse.parse(await response.json());
-      match = payload.installations.find(item => item.id === installationId);
-      if (match || payload.installations.length < 100) break;
-      page++;
+      for (const item of payload.installations) {
+        // User-token discovery is scoped to this app; also catch mismatched deployment credentials.
+        if (item.app_slug !== appSlug) throw new Error("GitHub App credentials do not match GITHUB_APP_SLUG");
+        if (item.suspended_at || (installationId !== null && item.id !== installationId)) continue;
+        verified.push({
+          installationId: item.id,
+          accountId: item.account.id,
+          accountLogin: item.account.login,
+          accountType: item.account.type,
+          repositorySelection: item.repository_selection,
+          permissions: item.permissions,
+        });
+      }
+      if ((installationId !== null && verified.length) || payload.installations.length < 100) {
+        return { profile, installations: verified };
+      }
     }
-    return {
-      profile,
-      installation: match ? {
-        installationId: match.id,
-        accountId: match.account.id,
-        accountLogin: match.account.login,
-        accountType: match.account.type,
-        repositorySelection: match.repository_selection,
-        permissions: match.permissions,
-      } : null,
-    };
+    throw new Error("GitHub installation discovery exceeded the page limit");
   }
 }
 

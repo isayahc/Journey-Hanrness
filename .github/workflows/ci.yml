@@ -33,7 +33,9 @@ jobs:
         if: always()
         with:
           name: goal-plan-screenshots
-          path: goal-plan-*.png
+          path: |
+            goal-plan-*.png
+            github-sync-*.png
           if-no-files-found: ignore
   setup:
     timeout-minutes: 8
