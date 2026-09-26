@@ -31,7 +31,7 @@ if (saved?.phase === 'complete') process.exit(0);
 if (!saved) {
   for (const name of fs.readdirSync(target)) {
     const stat = fs.lstatSync(path.join(target, name));
-    if (!metadata(name) || stat.isSymbolicLink() || (stat.isDirectory() && name !== '.git')) fail(20);
+    if (!metadata(name) || stat.isSymbolicLink() || (stat.isDirectory() && name !== '.git') || (name === '.git' && target !== root)) fail(20);
   }
   fs.mkdirSync(state, { recursive: true });
   fs.rmSync(stage, { recursive: true, force: true });

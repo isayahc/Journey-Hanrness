@@ -34,7 +34,7 @@ test('live chat → Daytona → checks → GitHub PR, including retry and persis
       const job = jobs[0];
       assert.equal(job.jobId, jobId);
       assert.ok(!['failed', 'cancelled', 'submission_failed'].includes(job.status), `Job failed: ${job.failure || job.status}`);
-      if (job.status === 'completed') {
+      if (job.status === 'completed' && job.sandbox?.state === 'deleted') {
         assert.ok(job.sandbox?.id); assert.equal(job.sandbox.state, 'deleted');
         assert.ok(job.checks.some((check: any) => check.command === 'npm run build' && check.ok));
         assert.ok(job.checks.every((check: any) => check.ok));

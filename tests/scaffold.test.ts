@@ -71,6 +71,8 @@ test('setup refuses existing apps, unsafe paths, symlinks, and arbitrary command
   fs.writeFileSync(path.join(f.repo, 'package.json'), 'original');
   assert.equal(f.run(), 20); assert.equal(f.calls.length, 0);
   assert.equal(fs.readFileSync(path.join(f.repo, 'package.json'), 'utf8'), 'original');
+  fs.mkdirSync(path.join(f.repo, 'nested', '.git'), { recursive: true });
+  assert.equal(f.run('nested'), 20, 'do not scaffold inside a nested Git repository');
   fs.symlinkSync(f.root, path.join(f.repo, 'escape'), 'dir');
   assert.equal(f.run('escape'), 21);
   for (const directory of ['../escape', '/tmp/out', '.git', 'app/../../out', 'app;touch bad', 'a$(id)', '--help', 'a\\b', 'a//b']) {
