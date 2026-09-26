@@ -11,6 +11,9 @@ import { connectDatabase } from "./db.js";
 import { MemoryRunStore, MongoRunStore } from "./runs/store.js";
 import { DemoRunPlanner, OpenCodeRunPlanner } from "./runs/planner.js";
 import { RunService } from "./runs/service.js";
+import { MemoryStrategyStore, MongoStrategyStore } from "./runs/strategy/store.js";
+import { StrategyService } from "./runs/strategy/service.js";
+import { resolveOpenCodeModel } from "./opencode-model.js";
 import { MongoSearchStore } from "./search/store.js";
 import { SearchService } from "./search/service.js";
 import { TavilyClient } from "./search/tavily.js";
@@ -49,7 +52,10 @@ async function main() {
   if (store instanceof MongoChatStore) await store.init();
   const runStore = db ? new MongoRunStore(db.runs) : new MemoryRunStore();
   await runStore.init();
-  const runs = new RunService(runStore, demo ? new DemoRunPlanner() : new OpenCodeRunPlanner(process.env, fetch, search));
+  const strategyStore = db ? new MongoStrategyStore(db.database) : new MemoryStrategyStore();
+  await strategyStore.init();
+  const strategies = new StrategyService(strategyStore, resolveOpenCodeModel(process.env).name);
+  const runs = new RunService(runStore, demo ? new DemoRunPlanner() : new OpenCodeRunPlanner(process.env, fetch, search), process.env, strategies);
 
   const github = githubOAuthFromEnv(origin.origin);
   let auth: AuthRuntime | undefined;
@@ -127,7 +133,7 @@ async function main() {
     throw new Error("GITHUB_APP_SLUG requires GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET");
   }
 
-  const app = createChatApp(store, provider, demo, port, auth, origin.origin, githubApp, runs, search);
+  const app = createChatApp(store, provider, demo, port, auth, origin.origin, githubApp, runs, search, strategies);
   let recovering = false;
   const recoverJobs = async () => {
     if (recovering) return;

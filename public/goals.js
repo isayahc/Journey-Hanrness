@@ -44,7 +44,8 @@ function renderRun(run) {
     blocked: 'Goal saved · Planning needs attention',
   };
   $('#run-status').textContent = statuses[run.status];
-  $('#run-metadata').textContent = `Model: ${run.model} · Up to ${run.limits.maxSteps} steps · ${run.limits.maxAttemptsPerStep} attempts per step · ${run.limits.maxDurationMinutes} minute execution budget · Planning attempts ${run.planningAttempts}/${run.maxPlanningAttempts}`;
+  const strategyLabel = run.strategyVersion ? `strategy v${run.strategyVersion}` : "strategy unpinned";
+  $('#run-metadata').textContent = `Model: ${run.model} · Up to ${run.limits.maxSteps} steps · ${run.limits.maxAttemptsPerStep} attempts per step · ${run.limits.maxDurationMinutes} minute execution budget · Planning attempts ${run.planningAttempts}/${run.maxPlanningAttempts} · ${strategyLabel}`;
   $('#run-criteria').replaceChildren();
   for (const criterion of run.successCriteria) {
     const item = document.createElement('li'); renderMarkdown(item, criterion); $('#run-criteria').append(item);

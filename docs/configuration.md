@@ -11,7 +11,12 @@ Application startup also initializes goal indexes automatically. The database
 user needs read/write access (including collection/index creation) to the configured
 database. No additional environment variables are needed for goal planning.
 
-Each run saves its selected model and execution limits. The goal form accepts
+Each run saves its selected model, execution limits, and, for runs created after
+strategy versioning, the pinned strategy id and version. No extra environment
+variables are required. `npm run db:init` also creates the harness strategy
+indexes. The comparison executor is deterministic and does not call OpenCode.
+
+The goal form accepts
 1–20 steps, 1–5 execution attempts per step, and a 1–240 minute execution budget.
 These execution limits are stored for the future executor. Planning itself is
 limited to three attempts per run, with a 90-second model request timeout.

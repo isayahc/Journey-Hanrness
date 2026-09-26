@@ -16,6 +16,7 @@ import { OpenCodeChatError, type ChatProvider, type ChatRepositoryContext } from
 import type { ChatStore, Message, Conversation } from "./store.js";
 import { ChatJobService, jobSubmissionError } from "./jobs.js";
 import { RunRequestError, type RunService } from "../runs/service.js";
+import { StrategyRequestError, type StrategyService } from "../runs/strategy/service.js";
 import type { SearchService } from "../search/service.js";
 
 const messageInput = z.object({ content: z.string().trim().min(1).max(4000), requestId: z.string().uuid().optional() }).strict();
@@ -107,6 +108,7 @@ export function createChatApp(
   githubApp?: GitHubAppRuntime,
   runs?: RunService,
   search?: SearchService,
+  strategies?: StrategyService,
 ) {
   const busy = new Map<string, AbortController>();
   const chatJobs = new ChatJobService(store, auth ? githubApp : undefined);
@@ -417,6 +419,48 @@ export function createChatApp(
         return job ? json(job) : json({ error: "Agent job not found." }, 404);
       }
 
+      if (url.pathname === "/api/strategies" || url.pathname.startsWith("/api/strategies/")) {
+        if (!strategies || !runs) return json({ error: "Strategy evaluation is not configured." }, 503);
+        const ownerId = await ownerForChat();
+        if (!ownerId) return json({ error: "Sign in with GitHub to continue." }, 401);
+        try {
+          if (request.method === "GET" && url.pathname === "/api/strategies") return json(await strategies.list(ownerId));
+          if (request.method === "GET" && url.pathname === "/api/strategies/active") return json(await strategies.active(ownerId));
+          if (request.method === "GET" && url.pathname === "/api/strategies/decisions") return json(await strategies.decisions(ownerId));
+          if (request.method === "POST" && url.pathname === "/api/strategies/outcomes") return json(await strategies.recordOutcome(ownerId, await request.json()), 201);
+          if (request.method === "POST" && url.pathname === "/api/strategies/proposals/from-outcomes") {
+            const result = await strategies.proposeFromOutcomes(ownerId);
+            return json(result, result.decision ? 422 : 201);
+          }
+          if (request.method === "POST" && url.pathname === "/api/strategies/proposals") {
+            const result = await strategies.propose(ownerId, await request.json());
+            return json(result, result.decision ? 422 : 201);
+          }
+          const comparisonMatch = /^\/api\/strategies\/comparisons\/([^/]+)$/.exec(url.pathname);
+          if (request.method === "GET" && comparisonMatch && uuid.safeParse(comparisonMatch[1]).success) return json(await strategies.comparison(ownerId, comparisonMatch[1]!));
+          const strategyMatch = /^\/api\/strategies\/([^/]+)\/(compare|promote|rollback)$/.exec(url.pathname);
+          if (request.method === "POST" && strategyMatch && uuid.safeParse(strategyMatch[1]).success) {
+            if (strategyMatch[2] === "compare") {
+              const body = await request.json().catch(() => ({}));
+              const setId = body && typeof body === "object" && "evaluationSetId" in body && typeof body.evaluationSetId === "string" ? body.evaluationSetId : undefined;
+              return json(await strategies.compare(ownerId, strategyMatch[1]!, setId), 201);
+            }
+            if (strategyMatch[2] === "promote") {
+              const decision = await strategies.promote(ownerId, strategyMatch[1]!);
+              return json(decision, decision.action === "promoted" ? 200 : 409);
+            }
+            const body = await request.json().catch(() => ({}));
+            const comparisonId = body && typeof body === "object" && "comparisonId" in body && typeof body.comparisonId === "string" ? body.comparisonId : "";
+            return json(await strategies.rollback(ownerId, strategyMatch[1]!, comparisonId));
+          }
+          return json({ error: "Not found." }, 404);
+        } catch (error) {
+          if (error instanceof StrategyRequestError) return json({ error: error.message }, error.status);
+          if (error instanceof SyntaxError) return json({ error: "Send a valid JSON strategy request." }, 400);
+          throw error;
+        }
+      }
+
       if (url.pathname === "/api/runs" || url.pathname.startsWith("/api/runs/")) {
         if (!runs) return json({ error: "Goal planning is not configured." }, 503);
         const ownerId = await ownerForChat();
@@ -430,9 +474,18 @@ export function createChatApp(
               return json(await runs.create(ownerId, input), 201);
             }
           }
-          const match = /^\/api\/runs\/([^/]+)(\/(?:plan|evidence))?$/.exec(url.pathname);
+          const match = /^\/api\/runs\/([^/]+)(\/(?:plan|evidence|strategy|migrations))?$/.exec(url.pathname);
           if (!match || !uuid.safeParse(match[1]).success) return json({ error: "Run not found." }, 404);
           if (request.method === "GET" && !match[2]) return json(await runs.get(ownerId, match[1]!));
+          if (request.method === "GET" && match[2] === "/migrations") {
+            if (!strategies) return json({ error: "Strategy evaluation is not configured." }, 503);
+            await runs.get(ownerId, match[1]!);
+            return json(await strategies.migrations(ownerId, match[1]!));
+          }
+          if (request.method === "POST" && match[2] === "/strategy") {
+            if (!strategies) return json({ error: "Strategy evaluation is not configured." }, 503);
+            return json(await strategies.migrateRun(ownerId, match[1]!, await request.json(), runs.store));
+          }
           if (request.method === "GET" && match[2] === "/evidence") {
             await runs.get(ownerId, match[1]!);
             return json(await search?.evidence({ ownerId, kind: "run", resourceId: match[1]! }) || []);
@@ -440,7 +493,8 @@ export function createChatApp(
           if (request.method === "POST" && match[2] === "/plan") return json(await runs.plan(ownerId, match[1]!));
           return json({ error: "Not found." }, 404);
         } catch (error) {
-          if (error instanceof RunRequestError) return json({ error: error.message }, error.status);
+          if (error instanceof RunRequestError || error instanceof StrategyRequestError) return json({ error: error.message }, error.status);
+          if (error instanceof SyntaxError) return json({ error: "Send a valid JSON strategy request." }, 400);
           throw error;
         }
       }

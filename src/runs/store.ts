@@ -5,14 +5,18 @@ import { MAX_PLANNING_ATTEMPTS, PLANNING_LEASE_MS, type GoalRun, type Plan, type
 export type PlanningResult = { plan: Plan } | { error: NonNullable<GoalRun["error"]> };
 export interface RunStore {
   init(): Promise<void>;
-  create(ownerId: string, input: RunInput, model: string): Promise<GoalRun>;
+  create(ownerId: string, input: RunInput, model: string, pin?: { strategyId: string; strategyVersion: number }): Promise<GoalRun>;
   list(ownerId: string): Promise<GoalRun[]>;
   get(ownerId: string, id: string): Promise<GoalRun | null>;
   claim(ownerId: string, id: string, now: Date): Promise<GoalRun | null>;
   finish(run: GoalRun, result: PlanningResult, now: Date): Promise<boolean>;
+  pinStrategy(ownerId: string, id: string, pin: { strategyId: string; strategyVersion: number }, now: Date): Promise<GoalRun | null>;
 }
-function newRun(ownerId: string, input: RunInput, model: string): GoalRun {
-  return { ...structuredClone(input), id: randomUUID(), ownerId, model, status: "draft", planningAttempts: 0, createdAt: new Date(), updatedAt: new Date() };
+function newRun(ownerId: string, input: RunInput, model: string, pin?: { strategyId: string; strategyVersion: number }): GoalRun {
+  return {
+    ...structuredClone(input), id: randomUUID(), ownerId, model, status: "draft", planningAttempts: 0, createdAt: new Date(), updatedAt: new Date(),
+    ...(pin ? { strategyId: pin.strategyId, strategyVersion: pin.strategyVersion } : {}),
+  };
 }
 
 export class MongoRunStore implements RunStore {
@@ -21,8 +25,8 @@ export class MongoRunStore implements RunStore {
     await this.collection.createIndex({ id: 1 }, { unique: true });
     await this.collection.createIndex({ ownerId: 1, updatedAt: -1 });
   }
-  async create(ownerId: string, input: RunInput, model: string) {
-    const run = newRun(ownerId, input, model);
+  async create(ownerId: string, input: RunInput, model: string, pin?: { strategyId: string; strategyVersion: number }) {
+    const run = newRun(ownerId, input, model, pin);
     await this.collection.insertOne({ ...run });
     return run;
   }
@@ -49,13 +53,18 @@ export class MongoRunStore implements RunStore {
     });
     return update.modifiedCount === 1;
   }
+  pinStrategy(ownerId: string, id: string, pin: { strategyId: string; strategyVersion: number }, now: Date) {
+    return this.collection.findOneAndUpdate({ ownerId, id }, {
+      $set: { strategyId: pin.strategyId, strategyVersion: pin.strategyVersion, updatedAt: now },
+    }, { returnDocument: "after", projection: { _id: 0 } });
+  }
 }
 
 export class MemoryRunStore implements RunStore {
   private runs = new Map<string, GoalRun>();
   async init() {}
-  async create(ownerId: string, input: RunInput, model: string) {
-    const run = newRun(ownerId, input, model);
+  async create(ownerId: string, input: RunInput, model: string, pin?: { strategyId: string; strategyVersion: number }) {
+    const run = newRun(ownerId, input, model, pin);
     this.runs.set(run.id, run);
     return structuredClone(run);
   }
@@ -83,5 +92,13 @@ export class MemoryRunStore implements RunStore {
     delete run.planningToken;
     delete run.planningExpiresAt;
     return true;
+  }
+  async pinStrategy(ownerId: string, id: string, pin: { strategyId: string; strategyVersion: number }, now: Date) {
+    const run = this.runs.get(id);
+    if (!run || run.ownerId !== ownerId) return null;
+    run.strategyId = pin.strategyId;
+    run.strategyVersion = pin.strategyVersion;
+    run.updatedAt = now;
+    return structuredClone(run);
   }
 }

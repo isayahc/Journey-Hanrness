@@ -125,6 +125,7 @@ The browser suite uses its own disposable database and never the application dat
 ## Delivery plan
 
 Follow [Epic #1](https://github.com/isayahc/Journey-Hanrness/issues/1) in separate
-PRs. Goal creation and validated planning are implemented. Long-running step
-execution, restart checkpoints, evaluation loops, and learned strategies are
-subsequent increments.
+PRs. Goal creation, validated planning, and versioned harness strategies are
+implemented. A strategy change is promoted only after a repeatable comparison;
+see [architecture](docs/architecture.md#harness-strategies). Long-running step
+execution, restart checkpoints, and live repair loops are still open.

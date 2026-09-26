@@ -49,9 +49,11 @@ feedback. A successful retry clears the error. There is no automatic model fallb
 `GET /api/runs` lists the latest 50 runs for the owner; `GET /api/runs/:id` retrieves
 a saved run. All reads and mutations use the existing authenticated account or
 anonymous browser owner. Mutation routes require same-origin JSON requests.
-The `/goals` interface displays criteria, stored limits, status, and the plan.
-Execution attempts and time budgets are stored for the upcoming step executor;
-this increment does not execute steps, claim task completion, or evaluate results.
+The `/goals` interface displays criteria, stored limits, status, the pinned strategy
+version, and the plan. New runs pin the owner's active strategy version. Runs saved
+before strategy versioning stay unpinned until an explicit migration. Execution
+attempts and time budgets are stored for the upcoming step executor; this increment
+does not execute steps or claim task completion.
 
 ## Search evidence
 
@@ -94,6 +96,67 @@ provided only to the clone/push subprocesses. Job state is rechecked before
 credential reuse. Webhooks revoke stale repository access. Workspace cleanup
 runs after execution, including failures.
 
+## Harness strategies
+
+`src/runs/strategy/` versions bounded harness strategies and compares them before
+promotion. A strategy configures planning instructions, memory selection, and
+execution approach (`dependency-ready` or `sequential`). Tools, repository access,
+and execution limits are copied from the parent and are a ceiling: a proposal that
+adds a tool, raises repository access, or increases a step, attempt, duration,
+context, or evidence budget is rejected and not saved as a candidate.
+
+Collections, all owner-scoped:
+
+| Collection | Contents |
+| --- | --- |
+| `harness_strategies` | Immutable strategy versions, rationale, evidence ids, parent, and proposer |
+| `harness_strategy_heads` | The single active strategy id for an owner |
+| `harness_strategy_outcomes` | Recorded outcomes the proposer may cite |
+| `harness_strategy_comparisons` | One baseline-versus-candidate comparison |
+| `harness_strategy_evaluations` | Per-case measurements linked to a comparison |
+| `harness_strategy_decisions` | Promotion, rejection, and rollback decisions |
+| `harness_strategy_migrations` | Explicit run pin changes |
+
+The baseline (`failure-evidence-v1`'s parent) verifies each success criterion, keeps
+the goal in memory, and does not select failure evidence. Proposer
+`failure-evidence-v1` reads failed schema or validation outcomes and proposes one
+change: include recorded failure evidence and append a revision instruction. It
+does not call a model.
+
+Promotion uses evaluation set `repair-v1` and executor `deterministic-v1`. Both
+sides share the parent limits and the service model. Measured time is 100ms per
+attempt, and tool calls stay at zero. Criteria `strict-improvement-v1` promote a
+candidate only when it has no case regression and either passes more cases, passes
+the same cases in fewer attempts, or uses the same attempts in less measured time.
+Otherwise the candidate is rejected and the active strategy stays in place.
+
+On `repair-v1` the baseline passes `stable-summary` and `citation-check` and fails
+`schema-repair` (2/3 successes, 5 attempts, 500ms, 5 model calls). The failure-evidence
+candidate also passes `schema-repair` on attempt 2 (3/3 successes, 4 attempts, 400ms,
+4 model calls). That is the measured improvement for this set only.
+
+Holdout set `holdout-v1` contains `failure-noise`, which the baseline passes and the
+failure-evidence candidate fails. A stored holdout comparison is evidence for
+rollback: the parent becomes active again and the candidate is marked `rolled_back`.
+The same candidate is not a general improvement.
+
+`POST /api/runs/:id/strategy` migrates one run to a retained strategy and writes a
+migration record. Promoting a strategy does not rewrite existing run pins.
+
+Planning loads the pinned version, not the current active strategy. Session
+permissions stay denied (plus optional Tavily). Strategy tools are shown only as
+frozen data and are not granted.
+
+### Gaps left by milestones 2–4
+
+Issues #21, #22, and #23 are not implemented in this repository. This increment
+does not add checkpointed step execution, worker leases, full run-memory
+reconstruction, or a live repair loop.
+
+- Outcomes are recorded explicitly. The evaluation harness does not execute saved plan steps.
+- `selectMemory` applies the strategy's memory policy to supplied items and never treats assumptions as verified evidence. It does not rebuild an OpenCode session from durable run memory.
+- `deterministic-v1` measures the strategy difference on fixed cases. It does not call OpenCode or prove a live task was repaired.
+
 ## Extension points
 
 `src/chat/` handles conversations and model calls. `src/agents/` handles
@@ -101,6 +164,7 @@ repository execution. `src/auth/` and `src/github/` handle accounts and access.
 `src/db.ts` owns MongoDB connections. The separate `src/research/` worker remains
 an offline stub and is not connected to chat or autonomous goal execution.
 
-The next increments introduce step execution, recoverable checkpoints, evidence
-memory, objective checks, and versioned strategy adaptation. Conversation
-history alone does not provide those execution guarantees.
+Step execution, recoverable checkpoints, durable run memory, and live objective
+repair remain later increments. Strategy versions are comparable only under the
+recorded evaluation configuration above. Conversation history alone does not
+provide those execution guarantees.

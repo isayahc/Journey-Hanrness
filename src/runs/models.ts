@@ -59,12 +59,17 @@ export interface GoalRun extends RunInput {
   planningExpiresAt?: Date;
   plan?: Plan;
   error?: { code: "INVALID_PLAN" | "PLANNER_UNAVAILABLE"; message: string };
+  /** Pinned at creation. Absent on runs saved before strategy versioning. */
+  strategyId?: string;
+  strategyVersion?: number;
 }
 
 export function publicRun(run: GoalRun, now = new Date()) {
   const { ownerId: _owner, planningToken: _token, ...data } = run;
   return {
     ...data,
+    strategyId: run.strategyId ?? null,
+    strategyVersion: run.strategyVersion ?? null,
     canPlan: run.status !== "planned" && run.planningAttempts < MAX_PLANNING_ATTEMPTS
       && (run.status !== "planning" || !!run.planningExpiresAt && run.planningExpiresAt <= now),
     maxPlanningAttempts: MAX_PLANNING_ATTEMPTS,

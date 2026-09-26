@@ -1,6 +1,7 @@
 import { MongoClient } from "mongodb";
 import type { GoalRun } from "./runs/models.js";
 import { MongoRunStore } from "./runs/store.js";
+import { MongoStrategyStore } from "./runs/strategy/store.js";
 import { MongoSearchStore } from "./search/store.js";
 import type { AgentJobAuthorization } from "./agents/job-authorizations.js";
 import type { AuthSession, GitHubIdentity, OAuthState } from "./auth/store.js";
@@ -42,6 +43,7 @@ export type Database = Awaited<ReturnType<typeof connectDatabase>>;
 export async function ensureIndexes(db: Database) {
   await Promise.all([
     new MongoRunStore(db.runs).init(),
+    new MongoStrategyStore(db.database).init(),
     new MongoSearchStore(db.database).init(),
     db.users.createIndex({ userId: 1 }, { unique: true }),
     db.profiles.createIndex({ userId: 1 }, { unique: true }),

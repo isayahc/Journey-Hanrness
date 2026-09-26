@@ -1,6 +1,7 @@
 import { resolveOpenCodeModel } from "../opencode-model.js";
 import { InvalidPlanError, MAX_PLANNING_ATTEMPTS, publicRun, runInput, validatePlan } from "./models.js";
 import type { RunPlanner } from "./planner.js";
+import type { StrategyService } from "./strategy/service.js";
 import type { PlanningResult, RunStore } from "./store.js";
 import { SearchError } from "../search/tavily.js";
 
@@ -9,7 +10,7 @@ export class RunRequestError extends Error {
 }
 export class RunService {
   private model: string;
-  constructor(readonly store: RunStore, private planner: RunPlanner, env: NodeJS.ProcessEnv = process.env) {
+  constructor(readonly store: RunStore, private planner: RunPlanner, env: NodeJS.ProcessEnv = process.env, private strategies?: StrategyService) {
     this.model = resolveOpenCodeModel(env).name;
   }
   async create(ownerId: string, value: unknown) {
@@ -18,7 +19,8 @@ export class RunService {
       const issue = parsed.error.issues[0]!;
       throw new RunRequestError(`Invalid ${issue.path.join(".") || "run"}. Provide a goal (1–4,000 characters), 1–10 success criteria (up to 500 characters each), and limits: 1–20 steps, 1–5 attempts per step, 1–240 minutes.`, 400);
     }
-    return publicRun(await this.store.create(ownerId, parsed.data, this.model));
+    const active = this.strategies ? await this.strategies.ensureBaseline(ownerId) : undefined;
+    return publicRun(await this.store.create(ownerId, parsed.data, this.model, active ? { strategyId: active.id, strategyVersion: active.version } : undefined));
   }
   async list(ownerId: string) { return (await this.store.list(ownerId)).map(run => publicRun(run)); }
   async get(ownerId: string, id: string) {
@@ -29,6 +31,11 @@ export class RunService {
   async plan(ownerId: string, id: string) {
     const existing = await this.get(ownerId, id);
     if (existing.status === "planned") return existing;
+    const strategy = existing.strategyId && existing.strategyVersion && this.strategies
+      ? await this.strategies.pinned(ownerId, existing.strategyId, existing.strategyVersion) : undefined;
+    if (existing.strategyId && this.strategies && !strategy) {
+      throw new RunRequestError("The strategy version pinned to this run is missing. Migrate the run explicitly to a retained strategy.", 409);
+    }
     const run = await this.store.claim(ownerId, id, new Date());
     if (!run) {
       const current = await this.get(ownerId, id);
@@ -38,7 +45,7 @@ export class RunService {
     }
     let result: PlanningResult;
     try {
-      result = { plan: validatePlan(await this.planner.plan(run), run.limits.maxSteps) };
+      result = { plan: validatePlan(await this.planner.plan(run, strategy ?? undefined), run.limits.maxSteps) };
     } catch (error) {
       result = { error: error instanceof InvalidPlanError
         ? { code: "INVALID_PLAN", message: error.message }

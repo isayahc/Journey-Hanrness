@@ -67,6 +67,7 @@ test('goals UI creates a plan, reloads, isolates owners, and survives a MongoDB 
     assert.equal(await page.locator('#run-criteria li').count(), 2);
     assert.equal(await page.locator('#plan-steps li').count(), 1);
     assert.match(await page.locator('#run-metadata').innerText(), /opencode\/space-bunny-free/);
+    assert.match(await page.locator('#run-metadata').innerText(), /strategy v1/);
     const savedUrl = page.url();
     const id = new URL(savedUrl).searchParams.get('run');
     assert.ok(id);
@@ -86,6 +87,8 @@ test('goals UI creates a plan, reloads, isolates owners, and survives a MongoDB 
       assert.equal(record.status, 'planned');
       assert.equal(record.planningAttempts, 1);
       assert.equal(record.model, 'opencode/space-bunny-free');
+      assert.equal(record.strategyVersion, 1);
+      assert.match(await page.locator('#run-metadata').innerText(), /strategy v1/);
     }
     await page.screenshot({ path: 'goal-plan-desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
