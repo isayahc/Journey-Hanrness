@@ -12,7 +12,7 @@ import type { GitHubAppRepositoryClient } from "../github/app-client.js";
 import type { GitHubInstallationStore } from "../github/installations.js";
 import type { ConnectedRepositoryStore } from "../github/repositories.js";
 import { handleGitHubWebhook, type GitHubWebhookRuntime } from "../github/webhooks.js";
-import { OpenCodeChatError, type ChatProvider } from "./provider.js";
+import { OpenCodeChatError, type ChatProvider, type ChatRepositoryContext } from "./provider.js";
 import type { ChatStore } from "./store.js";
 import { RunRequestError, type RunService } from "../runs/service.js";
 import type { SearchService } from "../search/service.js";
@@ -103,7 +103,7 @@ export function createChatApp(
   runs?: RunService,
   search?: SearchService,
 ) {
-  const busy = new Set<string>();
+  const busy = new Map<string, AbortController>();
   const configuredOrigin = new URL(appOrigin).origin;
   const allowed = new Set([configuredOrigin]);
   const originUrl = new URL(configuredOrigin);
@@ -425,25 +425,53 @@ export function createChatApp(
           if (request.method === "GET") return json(await store.list(ownerId));
           if (request.method === "POST") return json(await store.create(ownerId), 201);
         }
-        const match = /^\/api\/chats\/([^/]+)(\/(?:messages|evidence))?$/.exec(url.pathname);
+        const match = /^\/api\/chats\/([^/]+)(\/(?:messages|evidence|cancel))?$/.exec(url.pathname);
         if (!match || !uuid.safeParse(match[1]).success) return json({ error: "Not found." }, 404);
         const chat = await store.get(ownerId, match[1]!);
         if (!chat) return json({ error: "Conversation not found." }, 404);
         if (request.method === "GET" && !match[2]) return json(chat);
         if (request.method === "GET" && match[2] === "/evidence") return json(await search?.evidence({ ownerId, kind: "chat", resourceId: chat.id }) || []);
+        if (request.method === "POST" && match[2] === "/cancel") {
+          const active = busy.get(chat.id);
+          active?.abort(new DOMException("Reply stopped", "AbortError"));
+          return json({ cancelled: Boolean(active) });
+        }
         if (request.method !== "POST" || match[2] !== "/messages") return json({ error: "Not found." }, 404);
         if (chat.messages.length >= 100) return json({ error: "Start a new chat to continue (50 turns per chat)." }, 400);
         let input;
         try { input = messageInput.parse(await request.json()); } catch { return json({ error: "Enter a message of 1–4,000 characters." }, 400); }
         if (busy.has(chat.id)) return json({ error: "A reply is already in progress." }, 409);
-        busy.add(chat.id);
+        const controller = new AbortController();
+        busy.set(chat.id, controller);
         try {
           const user = { role: "user" as const, content: input.content };
-          const reply = await provider.reply([...chat.messages, user], chat.opencodeSessionId, chat.opencodeSessionVersion, { ownerId, kind: "chat", resourceId: chat.id });
+          let github: ChatRepositoryContext = { status: "not_configured", total: 0, truncated: false, repositories: [] };
+          if (auth && githubApp) {
+            const [installations, repositories] = await Promise.all([
+              githubApp.store.listForUser(ownerId), githubApp.repositoryStore.listForUser(ownerId),
+            ]);
+            const activeInstallations = new Set(installations.map(installation => installation.installationId));
+            const connected = repositories.filter(repository => activeInstallations.has(repository.installationId));
+            github = {
+              status: installations.length ? "connected" : "not_connected",
+              total: connected.length, truncated: connected.length > 200,
+              repositories: connected.slice(0, 200).map(repository => ({
+                fullName: repository.fullName, defaultBranch: repository.defaultBranch,
+                private: repository.private, archived: repository.archived,
+                agentEnabled: repository.agentEnabled && !repository.archived,
+                lastSyncedAt: repository.lastSyncedAt.toISOString(),
+              })),
+            };
+          }
+          controller.signal.throwIfAborted();
+          const reply = await provider.reply([...chat.messages, user], chat.opencodeSessionId, chat.opencodeSessionVersion,
+            { ownerId, kind: "chat", resourceId: chat.id }, { signal: controller.signal, github });
+          controller.signal.throwIfAborted();
           const assistant = { role: "assistant" as const, content: reply.content };
           if (!await store.append(chat, [user, assistant], reply.opencodeSessionId, reply.opencodeSessionVersion)) return json({ error: "Chat changed in another tab. Reload before sending again." }, 409);
           return json(await store.get(ownerId, chat.id));
         } catch (error) {
+          if (controller.signal.aborted) return json({ error: "Reply stopped.", code: "CHAT_CANCELLED" }, 409);
           const message = error instanceof Error ? error.message : String(error);
           console.error("[chat] reply failed", { chatId: chat.id, error: message });
           const userError = error instanceof OpenCodeChatError || message.startsWith("OpenCode server is unreachable")

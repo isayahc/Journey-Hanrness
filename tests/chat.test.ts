@@ -148,3 +148,69 @@ test("OpenCode maps a chat to one persistent session", async () => {
   assert.equal(calls.at(-1)?.path.endsWith('/message'), true);
   assert.equal(calls.at(-1)?.body.parts[0].text, JSON.stringify({ messages: [{ role: 'user', content: 'Again' }], evidence: [] }));
 });
+
+test("cancellation is owner-scoped, stops only the requested chat, and does not save a late reply", async () => {
+  const calls = new Map<string, { signal: AbortSignal; finish: () => void }>();
+  const app = createChatApp(new MemoryChatStore(), {
+    reply: async (messages, _id, _version, _scope, options) => {
+      await new Promise<void>(finish => calls.set(messages.at(-1)!.content, { signal: options!.signal!, finish }));
+      return { content: "Late provider reply" };
+    },
+  }, false, 3000);
+  const request = browser(app);
+  const first = await (await request('/api/chats', {})).json();
+  const second = await (await request('/api/chats', {})).json();
+  const reply1 = request(`/api/chats/${first.id}/messages`, { content: 'first' });
+  const reply2 = request(`/api/chats/${second.id}/messages`, { content: 'second' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal((await browser(app)(`/api/chats/${first.id}/cancel`, {})).status, 404);
+  assert.equal(calls.get('first')!.signal.aborted, false);
+  assert.equal((await request(`/api/chats/${first.id}/messages`, { content: 'duplicate' })).status, 409);
+  assert.equal((await request(`/api/chats/${first.id}/cancel`, {})).status, 200);
+  assert.equal(calls.get('first')!.signal.aborted, true);
+  assert.equal(calls.get('second')!.signal.aborted, false);
+  calls.get('first')!.finish();
+  assert.equal((await (await reply1).json()).code, 'CHAT_CANCELLED');
+  assert.equal((await (await request(`/api/chats/${first.id}`)).json()).messages.length, 0);
+  calls.get('second')!.finish();
+  assert.equal((await reply2).status, 200);
+  assert.equal((await (await request(`/api/chats/${second.id}`)).json()).messages.length, 2);
+  const retry = request(`/api/chats/${first.id}/messages`, { content: 'retry' });
+  await new Promise(resolve => setImmediate(resolve));
+  calls.get('retry')!.finish();
+  assert.equal((await retry).status, 200, 'cancelled chat is unlocked after cleanup');
+});
+
+test("OpenCode cancellation aborts the remote session and repository context is included on every turn", async () => {
+  const controller = new AbortController();
+  const calls: { path: string; body: any }[] = [];
+  let started!: () => void;
+  const prompting = new Promise<void>(resolve => { started = resolve; });
+  const provider = new OpenCodeChatProvider({}, async (input, init) => {
+    const request = new Request(input, init), path = new URL(request.url).pathname;
+    const text = await request.text();
+    const body = text ? JSON.parse(text) : undefined;
+    calls.push({ path, body });
+    if (path.endsWith('/message')) {
+      started();
+      return new Promise<Response>((_resolve, reject) => {
+        request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true });
+      });
+    }
+    if (path.endsWith('/abort')) return Response.json(true);
+    return Response.json({ id: 'cancellable-session' });
+  });
+  const github = { status: 'connected' as const, total: 1, truncated: false, repositories: [
+    { fullName: 'alice/project', defaultBranch: 'main', private: true, archived: false, agentEnabled: false, lastSyncedAt: '2026-09-26T17:00:00.000Z' },
+  ] };
+  const reply = provider.reply([{ role: 'user', content: 'Which repositories?' }], 'existing-session', 3, undefined, { signal: controller.signal, github });
+  const rejected = assert.rejects(reply, error => error instanceof DOMException && error.name === 'AbortError');
+  await prompting;
+  controller.abort(new DOMException('Stopped', 'AbortError'));
+  await rejected;
+  const prompt = calls.find(call => call.path.endsWith('/message'))!.body;
+  assert.deepEqual(JSON.parse(prompt.parts[0].text).github, github);
+  assert.match(prompt.system, /supersedes older repository lists/);
+  assert.match(prompt.system, /does not give this chat repository file access/);
+  assert.ok(calls.some(call => call.path === '/session/existing-session/abort'));
+});

@@ -1,13 +1,25 @@
 const $ = selector => document.querySelector(selector);
 let current = null;
-let busy = false;
+let initializing = true;
+let loadingChat = false;
+let syncingRepositories = false;
+let navigationVersion = 0;
+let historyVersion = 0;
+let draftNumber = 0;
+let activeKey = 'draft-0';
+const drafts = new Map();
+const pendingReplies = new Map();
+const chatErrors = new Map();
 let authBlocked = false;
 let repositoryMode = false;
 let githubRepoSyncEnabled = false;
 
-async function api(path, body) {
-  const response = await fetch(path, body === undefined ? {} : {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+async function api(path, body, timeout = 15000) {
+  const response = await fetch(path, {
+    signal: AbortSignal.timeout(timeout),
+    ...(body === undefined ? {} : {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }),
   });
   const data = await response.json();
   if (!response.ok) {
@@ -47,7 +59,13 @@ function renderMessage(message, pending = false) {
 function render() {
   $('#messages').replaceChildren();
   for (const message of current?.messages || []) renderMessage(message);
-  $('#welcome').hidden = authBlocked || repositoryMode || !!current?.messages.length;
+  const pending = pendingReplies.get(activeKey);
+  if (pending) renderMessage({ role: 'user', content: pending.content }, true);
+  $('#welcome').hidden = authBlocked || repositoryMode || !!current?.messages.length || !!pending;
+  $('#message').value = drafts.get(activeKey) || '';
+  $('#error').hidden = !chatErrors.has(activeKey);
+  $('#error').textContent = chatErrors.get(activeKey) || '';
+  updateControls();
 }
 function setAuthBlocked(value, message) {
   authBlocked = value;
@@ -59,7 +77,7 @@ function setAuthBlocked(value, message) {
     $('#welcome').hidden = true;
     if (message) $('#auth-message').textContent = message;
   }
-  setBusy(busy);
+  updateControls();
 }
 function setRepositoryMode(value) {
   repositoryMode = value;
@@ -70,18 +88,33 @@ function setRepositoryMode(value) {
   if (!value) render();
 }
 async function refreshHistory() {
+  const version = ++historyVersion;
   const chats = await api('/api/chats');
+  if (version !== historyVersion) return chats;
   $('#history').replaceChildren();
   for (const chat of chats) {
     const button = document.createElement('button');
     button.textContent = chat.title; button.title = chat.title;
     button.setAttribute('aria-current', String(chat.id === current?.id));
-    button.disabled = busy || authBlocked;
+    button.disabled = initializing || authBlocked;
     button.onclick = async () => {
-      if (busy || authBlocked) return;
+      if (initializing || authBlocked) return;
+      const selection = ++navigationVersion;
+      drafts.set(activeKey, $('#message').value);
+      activeKey = chat.id;
+      current = { ...chat, messages: [] };
+      loadingChat = true;
       setRepositoryMode(false);
-      try { current = await api(`/api/chats/${chat.id}`); render(); await refreshHistory(); }
-      catch (error) { showError(error); }
+      try {
+        const loaded = await api(`/api/chats/${chat.id}`);
+        if (selection !== navigationVersion) return;
+        if (!(current?.version > loaded.version)) current = loaded;
+      } catch (error) {
+        if (selection === navigationVersion) chatErrors.set(chat.id, error.message);
+      } finally {
+        if (selection === navigationVersion) { loadingChat = false; render(); }
+      }
+      await refreshHistory().catch(showError);
     };
     $('#history').append(button);
   }
@@ -136,23 +169,41 @@ async function loadRepositories() {
   renderRepositories(repositories);
   return repositories;
 }
-function setBusy(value) {
-  busy = value;
-  for (const element of document.querySelectorAll('button, textarea')) element.disabled = value || authBlocked;
-  for (const element of document.querySelectorAll('[data-always-disabled="true"]')) element.disabled = true;
-  $('#sync-repositories').disabled = value || authBlocked || !githubRepoSyncEnabled;
-  $('#logout').disabled = value;
-  $('#thinking').hidden = !value;
+function updateControls() {
+  const blocked = initializing || authBlocked;
+  const pending = pendingReplies.get(activeKey);
+  $('#new-chat').disabled = blocked;
+  $('#repositories-button').disabled = blocked;
+  $('#message').disabled = blocked || loadingChat || !!pending;
+  $('#send').disabled = blocked || loadingChat || !!pending;
+  $('#sync-repositories').disabled = blocked || syncingRepositories || !githubRepoSyncEnabled;
+  $('#logout').disabled = initializing;
+  for (const button of $('#history').children) button.disabled = blocked;
+  $('#stop').hidden = !pending;
+  $('#stop').disabled = blocked || !pending?.chatId || !!pending?.stopping;
+  $('#thinking').hidden = !pending || authBlocked || repositoryMode;
+  if (pending) {
+    const seconds = Math.floor((Date.now() - pending.startedAt) / 1000);
+    const status = pending.stopping ? 'Stopping…'
+      : seconds < 15 ? 'Thinking…' : 'Still working… You can stop this reply or open another chat.';
+    if ($('#thinking').textContent !== status) $('#thinking').textContent = status;
+  }
+  $('#messages').setAttribute('aria-busy', String(!!pending));
 }
-$('#new-chat').onclick = async () => {
-  if (busy || authBlocked) return;
+$('#message').oninput = () => drafts.set(activeKey, $('#message').value);
+$('#new-chat').onclick = () => {
+  if (initializing || authBlocked) return;
+  ++navigationVersion;
+  drafts.set(activeKey, $('#message').value);
+  activeKey = `draft-${++draftNumber}`;
+  loadingChat = false;
+  current = null;
   setRepositoryMode(false);
-  current = null; render(); $('#error').hidden = true; $('#message').value = '';
-  try { await refreshHistory(); } catch (error) { showError(error); }
+  void refreshHistory().catch(showError);
   $('#message').focus();
 };
 $('#repositories-button').onclick = async () => {
-  if (busy || authBlocked) return;
+  if (initializing || authBlocked) return;
   setRepositoryMode(!repositoryMode);
   if (repositoryMode) {
     try { await loadRepositories(); }
@@ -163,11 +214,11 @@ $('#repositories-button').onclick = async () => {
   }
 };
 $('#sync-repositories').onclick = async () => {
-  if (!githubRepoSyncEnabled || busy) return;
+  if (!githubRepoSyncEnabled || initializing || authBlocked || syncingRepositories) return;
   $('#repo-sync-note').hidden = true;
-  setBusy(true);
+  syncingRepositories = true; updateControls();
   try {
-    const repositories = await api('/api/github/repositories/sync', {});
+    const repositories = await api('/api/github/repositories/sync', {}, 90000);
     renderRepositories(repositories);
     $('#repo-sync-note').textContent = repositories.length
       ? 'Repository access refreshed from GitHub.'
@@ -180,41 +231,94 @@ $('#sync-repositories').onclick = async () => {
     }
     $('#repo-sync-note').textContent = error.message;
     $('#repo-sync-note').hidden = false;
-  } finally { setBusy(false); }
+  } finally { syncingRepositories = false; updateControls(); }
 };
 for (const button of document.querySelectorAll('[data-prompt]')) button.onclick = () => {
-  $('#message').value = button.dataset.prompt; $('#message').focus();
+  if (initializing || authBlocked || pendingReplies.has(activeKey)) return;
+  $('#message').value = button.dataset.prompt; drafts.set(activeKey, button.dataset.prompt); $('#message').focus();
 };
 $('#message').onkeydown = event => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-    event.preventDefault(); if (!busy && !authBlocked) $('#composer').requestSubmit();
+    event.preventDefault(); if (!initializing && !loadingChat && !authBlocked && !pendingReplies.has(activeKey)) $('#composer').requestSubmit();
   }
 };
 $('#composer').onsubmit = async event => {
   event.preventDefault();
   const content = $('#message').value.trim();
-  if (!content || busy || authBlocked) return;
-  $('#error').hidden = true; setBusy(true);
+  if (!content || initializing || loadingChat || authBlocked || pendingReplies.has(activeKey)) return;
+  let key = activeKey;
+  let chat = current;
+  const operation = { content, chatId: chat?.id, startedAt: Date.now(), stopping: false };
+  pendingReplies.set(key, operation);
+  drafts.set(key, '');
+  chatErrors.delete(key);
+  render();
+  $('#thinking').scrollIntoView({ block: 'nearest' });
+  const timer = setInterval(updateControls, 1000);
   try {
-    if (!current) current = await api('/api/chats', {});
-    $('#welcome').hidden = true; renderMessage({ role: 'user', content }, true);
-    $('#thinking').scrollIntoView({ block: 'nearest' });
-    current = await api(`/api/chats/${current.id}/messages`, { content });
-    $('#message').value = ''; render();
-  } catch (error) { render(); showError(error); }
-  finally {
-    setBusy(false);
-    try { await refreshHistory(); } catch (error) { showError(error); }
-    $('#message').focus();
+    if (!chat) {
+      chat = await api('/api/chats', {});
+      operation.chatId = chat.id;
+      pendingReplies.delete(key);
+      pendingReplies.set(chat.id, operation);
+      drafts.delete(key);
+      if (activeKey === key) { activeKey = chat.id; current = chat; render(); }
+      key = chat.id;
+      void refreshHistory().catch(() => {});
+    }
+    const result = await api(`/api/chats/${chat.id}/messages`, { content }, 105000);
+    if (activeKey === key) current = result;
+  } catch (error) {
+    let recovered = false;
+    if (error.name === 'TimeoutError' && chat) {
+      // A lost response may already have been saved. Reconcile before offering a retry.
+      await api(`/api/chats/${chat.id}/cancel`, {}).catch(() => {});
+      try {
+        const latest = await api(`/api/chats/${chat.id}`);
+        recovered = latest.version > chat.version;
+        if (activeKey === key) current = latest;
+      } catch { /* Keep the user's draft if recovery is unavailable. */ }
+    }
+    if (!recovered) {
+      drafts.set(key, content);
+      chatErrors.set(key, error.code === 'CHAT_CANCELLED'
+        ? 'Reply stopped. Your message is ready to send again.'
+        : error.name === 'TimeoutError' ? 'The request timed out. Check the conversation before retrying. Your message has been kept.' : error.message);
+    }
+  } finally {
+    clearInterval(timer);
+    pendingReplies.delete(key);
+    if (activeKey === key) { render(); if (!repositoryMode) $('#message').focus(); }
+    await refreshHistory().catch(() => {});
+  }
+};
+$('#stop').onclick = async () => {
+  const key = activeKey;
+  const operation = pendingReplies.get(key);
+  if (!operation?.chatId || operation.stopping) return;
+  operation.stopping = true; updateControls();
+  try {
+    const result = await api(`/api/chats/${operation.chatId}/cancel`, {});
+    if (!result.cancelled && pendingReplies.get(key) === operation) {
+      operation.stopping = false;
+      chatErrors.set(key, 'The reply is starting or has just finished. Try Stop again if it is still running.');
+      if (activeKey === key) render();
+    }
+  }
+  catch (error) {
+    if (pendingReplies.get(key) !== operation) return;
+    operation.stopping = false;
+    chatErrors.set(key, `Could not stop the reply: ${error.message}`);
+    if (activeKey === key) render();
   }
 };
 $('#logout').onclick = async () => {
-  if (busy) return;
+  if (initializing) return;
   try { await api('/auth/logout', {}); window.location.assign('/'); }
   catch (error) { showError(error); }
 };
 async function init() {
-  setBusy(true);
+  initializing = true; updateControls();
   try {
     const status = await api('/api/status');
     githubRepoSyncEnabled = !!status.githubRepoSyncEnabled;
@@ -223,7 +327,7 @@ async function init() {
     const authProblem = params.get('auth');
     const githubResult = params.get('github');
     if (status.authEnabled) {
-      const meResponse = await fetch('/api/me');
+      const meResponse = await fetch('/api/me', { signal: AbortSignal.timeout(15000) });
       if (meResponse.status === 401) {
         const message = authProblem === 'denied'
           ? 'GitHub sign-in was cancelled. You can try again when you are ready.'
@@ -262,13 +366,13 @@ async function init() {
       $('#footnote').textContent = status.demo ? 'Demo replies only. History resets when the server stops.' : 'Local mode: history saved in MongoDB for this browser. AI can make mistakes.';
     }
     const chats = await refreshHistory();
-    if (chats.length) current = await api(`/api/chats/${chats[0].id}`);
+    if (chats.length) { current = await api(`/api/chats/${chats[0].id}`); activeKey = current.id; }
     render();
     if (githubResult === 'connected' && status.githubAppEnabled) {
       setRepositoryMode(true);
       await loadRepositories();
     }
   } catch (error) { showError(error); $('#mode').textContent = 'Unavailable'; }
-  finally { setBusy(false); }
+  finally { initializing = false; updateControls(); }
 }
 init();
