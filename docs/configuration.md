@@ -102,6 +102,16 @@ Recovery uses the existing setup callback; no new callback URL is required. User
 access tokens are discarded after verification, and recovered repositories still
 require explicit agent enablement.
 
+If GitHub shows **The `redirect_uri` is not associated with this application**,
+open the GitHub App registration under Developer settings → GitHub Apps → Edit.
+Under **Callback URL**, keep `${APP_ORIGIN}/auth/github/callback` and add
+`${APP_ORIGIN}/github/setup/callback` as a second entry, then save. The separate
+**Setup URL** is `${APP_ORIGIN}/github/setup`; adding a setup URL does not register
+an authorization callback. Match the scheme, hostname, port, and path exactly
+(including `localhost` versus `127.0.0.1`). Start **Reconnect GitHub** again from
+the app after saving. Updating the GitHub registration does not require a new key
+or an app restart. Changing `APP_ORIGIN` does require restarting the app.
+
 Set `GITHUB_APP_WEBHOOK_SECRET` and use `${APP_ORIGIN}/webhooks/github` as the
 JSON webhook endpoint. Subscribe to installation and installation-repository
 events so removal, suspension, and deletion revoke access.
