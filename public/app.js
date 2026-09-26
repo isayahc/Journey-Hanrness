@@ -208,7 +208,7 @@ async function init() {
   try {
     const status = await api('/api/status');
     githubRepoSyncEnabled = !!status.githubRepoSyncEnabled;
-    $('#mode').textContent = status.demo ? 'Demo · No AI connected' : 'OpenCode';
+    $('#mode').textContent = status.demo ? 'Demo · No AI connected' : status.webSearch?.configured ? 'OpenCode · Tavily' : 'OpenCode · Search off';
     const params = new URLSearchParams(window.location.search);
     const authProblem = params.get('auth');
     const githubResult = params.get('github');

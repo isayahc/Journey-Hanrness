@@ -145,7 +145,7 @@ async function init() {
     }
     if (!status.goalPlanningEnabled) throw new Error('Goal planning is not available on this server.');
     enabled = true; $('#goals-workspace').hidden = false;
-    $('#run-mode').textContent = status.demo ? 'Demo · No AI connected' : 'OpenCode';
+    $('#run-mode').textContent = status.demo ? 'Demo · No AI connected' : status.webSearch?.configured ? 'OpenCode · Tavily' : 'OpenCode · Search off';
     if (status.demo) $('#storage-note').textContent = 'Demo only: sample plans, no AI, and temporary history that resets when the server stops.';
     const runs = await refreshHistory();
     const id = new URL(location.href).searchParams.get('run') || runs[0]?.id;

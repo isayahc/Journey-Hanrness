@@ -15,6 +15,7 @@ import { handleGitHubWebhook, type GitHubWebhookRuntime } from "../github/webhoo
 import { OpenCodeChatError, type ChatProvider } from "./provider.js";
 import type { ChatStore } from "./store.js";
 import { RunRequestError, type RunService } from "../runs/service.js";
+import type { SearchService } from "../search/service.js";
 
 const messageInput = z.object({ content: z.string().trim().min(1).max(4000) }).strict();
 const agentAccessInput = z.object({ enabled: z.boolean() }).strict();
@@ -96,6 +97,7 @@ export function createChatApp(
   appOrigin = `http://localhost:${port}`,
   githubApp?: GitHubAppRuntime,
   runs?: RunService,
+  search?: SearchService,
 ) {
   const busy = new Set<string>();
   const configuredOrigin = new URL(appOrigin).origin;
@@ -164,6 +166,7 @@ export function createChatApp(
           agentCredentialBrokerEnabled: Boolean(githubApp?.credentialBroker),
           agentExecutionEnabled: Boolean(githubApp?.repositoryExecutor),
           goalPlanningEnabled: Boolean(runs),
+          webSearch: { provider: "tavily", configured: !!search?.enabled },
         });
       }
 
@@ -368,10 +371,14 @@ export function createChatApp(
               return json(await runs.create(ownerId, input), 201);
             }
           }
-          const match = /^\/api\/runs\/([^/]+)(\/plan)?$/.exec(url.pathname);
+          const match = /^\/api\/runs\/([^/]+)(\/(?:plan|evidence))?$/.exec(url.pathname);
           if (!match || !uuid.safeParse(match[1]).success) return json({ error: "Run not found." }, 404);
           if (request.method === "GET" && !match[2]) return json(await runs.get(ownerId, match[1]!));
-          if (request.method === "POST" && match[2]) return json(await runs.plan(ownerId, match[1]!));
+          if (request.method === "GET" && match[2] === "/evidence") {
+            await runs.get(ownerId, match[1]!);
+            return json(await search?.evidence({ ownerId, kind: "run", resourceId: match[1]! }) || []);
+          }
+          if (request.method === "POST" && match[2] === "/plan") return json(await runs.plan(ownerId, match[1]!));
           return json({ error: "Not found." }, 404);
         } catch (error) {
           if (error instanceof RunRequestError) return json({ error: error.message }, error.status);
@@ -386,12 +393,13 @@ export function createChatApp(
           if (request.method === "GET") return json(await store.list(ownerId));
           if (request.method === "POST") return json(await store.create(ownerId), 201);
         }
-        const match = /^\/api\/chats\/([^/]+)(\/messages)?$/.exec(url.pathname);
+        const match = /^\/api\/chats\/([^/]+)(\/(?:messages|evidence))?$/.exec(url.pathname);
         if (!match || !uuid.safeParse(match[1]).success) return json({ error: "Not found." }, 404);
         const chat = await store.get(ownerId, match[1]!);
         if (!chat) return json({ error: "Conversation not found." }, 404);
         if (request.method === "GET" && !match[2]) return json(chat);
-        if (request.method !== "POST" || !match[2]) return json({ error: "Not found." }, 404);
+        if (request.method === "GET" && match[2] === "/evidence") return json(await search?.evidence({ ownerId, kind: "chat", resourceId: chat.id }) || []);
+        if (request.method !== "POST" || match[2] !== "/messages") return json({ error: "Not found." }, 404);
         if (chat.messages.length >= 100) return json({ error: "Start a new chat to continue (50 turns per chat)." }, 400);
         let input;
         try { input = messageInput.parse(await request.json()); } catch { return json({ error: "Enter a message of 1–4,000 characters." }, 400); }
@@ -399,7 +407,7 @@ export function createChatApp(
         busy.add(chat.id);
         try {
           const user = { role: "user" as const, content: input.content };
-          const reply = await provider.reply([...chat.messages, user], chat.opencodeSessionId, chat.opencodeSessionVersion);
+          const reply = await provider.reply([...chat.messages, user], chat.opencodeSessionId, chat.opencodeSessionVersion, { ownerId, kind: "chat", resourceId: chat.id });
           const assistant = { role: "assistant" as const, content: reply.content };
           if (!await store.append(chat, [user, assistant], reply.opencodeSessionId, reply.opencodeSessionVersion)) return json({ error: "Chat changed in another tab. Reload before sending again." }, 409);
           return json(await store.get(ownerId, chat.id));

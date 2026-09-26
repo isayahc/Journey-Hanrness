@@ -60,6 +60,8 @@ test("startup serves the app and stops only its owned OpenCode process", {
     console.info("Startup smoke: managed service");
     await startApp();
     assert.equal(await health(settings), true);
+    const tools = await (await fetch(new URL('/experimental/tool/ids', settings.url), { headers: settings.headers })).json();
+    assert.ok(tools.includes('tavily_search'), 'The native OpenCode runtime must load the project search tool');
     console.info("Startup smoke: stopping managed service");
     await stop(supervisor);
     await until(async () => !await health(settings), "Owned OpenCode process was left running");

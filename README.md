@@ -49,10 +49,34 @@ with `npm run opencode -- auth login`.
 If catalog refresh could not finish during installation, run
 `npm run opencode -- models opencode --refresh` before using a newly released model.
 
+## Web search with Tavily
+
+Add your key to `.env` and restart the app and OpenCode:
+
+```dotenv
+TAVILY_API_KEY=your-tavily-key
+```
+
+`npm install` installs the OpenCode tool dependency. Chat and goal planning use
+`tavily_search` for external research, with source URLs, excerpts, and timestamps
+saved in MongoDB. Each conversation or goal has a shared budget of 10 searches,
+including failed provider calls and planning retries. Each call returns at most
+five sources and times out after 10 seconds. Agents are instructed to cite sources
+and treat retrieved content as evidence rather than instructions.
+
+Without a key, web search is unavailable; chat and planning still work. There is
+no fallback to another search provider. Chat can still fetch supplied page URLs.
+Existing conversations keep their saved messages when search permissions change.
+
+With `npm start` running, verify the complete agent → Tavily → MongoDB → citation
+flow in a second terminal using `npm run search:smoke`. This opt-in command calls
+the live model and Tavily API and removes only its own temporary evidence.
+See [configuration](docs/configuration.md#tavily-search) for separate OpenCode servers.
+
 ## Agent behavior
 
 - Conversations and their OpenCode session IDs are saved in MongoDB.
-- Chat can search the web and retrieve pages. Chat cannot read or modify local
+- With Tavily configured, chat can search the web and retrieve pages. Chat cannot read or modify local
   files, run shell commands, or create repository changes.
 - Repository jobs require GitHub sign-in, a connected GitHub App installation,
   explicit access for the selected repository, and execution enabled on the worker.
@@ -79,6 +103,7 @@ See [configuration](docs/configuration.md) for GitHub setup and
 | `npm run check` | Typecheck |
 | `npm test` | Run tests |
 | `npm run db:init` | Initialize database indexes, including goal runs |
+| `npm run search:smoke` | Opt-in live agent search and citation check; requires Tavily, MongoDB, and a running OpenCode server |
 | `npm run test:browser` | Verify goal creation and reload in Chromium; with `MONGODB_TEST_URI`, also verify a full app restart |
 | `npm run build` | Compile TypeScript |
 

@@ -2,6 +2,7 @@ import { resolveOpenCodeModel } from "../opencode-model.js";
 import { InvalidPlanError, MAX_PLANNING_ATTEMPTS, publicRun, runInput, validatePlan } from "./models.js";
 import type { RunPlanner } from "./planner.js";
 import type { PlanningResult, RunStore } from "./store.js";
+import { SearchError } from "../search/tavily.js";
 
 export class RunRequestError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -41,7 +42,7 @@ export class RunService {
     } catch (error) {
       result = { error: error instanceof InvalidPlanError
         ? { code: "INVALID_PLAN", message: error.message }
-        : { code: "PLANNER_UNAVAILABLE", message: "Planning failed or timed out. Your goal is saved. Check the OpenCode server and access to the run's recorded model, then retry." } };
+        : { code: "PLANNER_UNAVAILABLE", message: error instanceof SearchError ? error.message : "Planning failed or timed out. Your goal is saved. Check the OpenCode server and access to the run's recorded model, then retry." } };
     }
     if (!await this.store.finish(run, result, new Date())) {
       throw new RunRequestError("This planning attempt expired or was replaced. Refresh the run before retrying.", 409);
