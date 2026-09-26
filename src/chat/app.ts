@@ -36,7 +36,7 @@ const SESSION_COOKIE = "journey_session";
 const OAUTH_STATE_COOKIE = "journey_oauth_state";
 const INSTALL_STATE_COOKIE = "journey_install_state";
 const OWNER_COOKIE = "journey_owner";
-const executionIntent = (content: string) => /\b(build|create|implement|change|modify|fix|add|remove|update|refactor|scaffold|open (a )?pull request|try again|retry|resume|current|latest|today|news|research|official|source|sources|search|lookup)\b/i.test(content);
+const executionIntent = (content: string) => /\b(build|create|implement|change|modify|fix|add|remove|update|refactor|scaffold|open (a )?pull request|try again|retry|resume|run|execute|daytona|sandbox|workspace|launch|current|latest|today|news|research|official|source|sources|search|lookup)\b/i.test(content);
 
 export interface AuthRuntime {
   store: AuthStore;
