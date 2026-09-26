@@ -85,6 +85,8 @@ See [configuration](docs/configuration.md#tavily-search) for separate OpenCode s
   not push to the default branch or merge automatically.
 - Tool results and errors are handled by the server; credentials stay server-side.
 
+For remote repository execution, see [Daytona setup and recovery](docs/daytona.md).
+
 See [configuration](docs/configuration.md) for GitHub setup and
 [architecture](docs/architecture.md) for the execution flow.
 

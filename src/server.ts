@@ -1,3 +1,4 @@
+import { executionEnvironmentFromEnv } from "./agents/daytona-environment.js";
 import { createServer } from "node:http";
 import { AgentGitHubCredentialBroker } from "./agents/credential-broker.js";
 import { OpenCodeRepositoryAgent } from "./agents/opencode-repository-agent.js";
@@ -85,6 +86,7 @@ async function main() {
             commands: new NodeCommandRunner(),
             agent: new OpenCodeRepositoryAgent(),
             workspaceRoot: process.env.JOURNEY_AGENT_WORKSPACE_ROOT,
+            environment: executionEnvironmentFromEnv(),
           })
         : undefined;
       const webhookSecret = githubWebhookSecretFromEnv();

@@ -15,6 +15,17 @@ export interface AgentJobAuthorization {
   summary?: string;
   pullRequestNumber?: number;
   pullRequestUrl?: string;
+  checkpoint?: "workspace" | "modified" | "committed" | "push_pending" | "pushed" | "pr_pending" | "completed";
+  sandbox?: {
+    name: string;
+    id?: string;
+    state: "provisioning" | "running" | "stopped" | "deleted" | "cleanup_failed";
+    updatedAt: Date;
+    expiresAt: Date;
+  };
+  artifacts?: Array<{ kind: "diff" | "checks"; uri: string }>;
+  executionLog?: Array<{ command: string; code: number; at: Date }>;
+  leaseUntil?: Date;
   status: AgentJobStatus;
   checks?: Array<{ command: string; ok: boolean }>;
   failure?: string;
@@ -37,6 +48,11 @@ export interface CreateAgentJobInput {
 
 type AgentJobExecutionPatch = Partial<Pick<
   AgentJobAuthorization,
+  | "checkpoint"
+  | "sandbox"
+  | "artifacts"
+  | "executionLog"
+  | "leaseUntil"
   | "commitSha"
   | "summary"
   | "pullRequestNumber"
@@ -49,6 +65,7 @@ type AgentJobExecutionPatch = Partial<Pick<
 
 export interface AgentJobAuthorizationStore {
   init(): Promise<void>;
+  claim(jobId: string, userId: string, leaseUntil: Date): Promise<AgentJobAuthorization | null>;
   create(jobId: string, userId: string, repositoryId: number, metadata?: Omit<CreateAgentJobInput, "jobId" | "userId" | "repositoryId">): Promise<AgentJobAuthorization>;
   get(jobId: string, userId: string): Promise<AgentJobAuthorization | null>;
   setStatus(jobId: string, userId: string, status: AgentJobStatus): Promise<AgentJobAuthorization | null>;
@@ -65,6 +82,16 @@ export class MongoAgentJobAuthorizationStore implements AgentJobAuthorizationSto
       this.jobs.createIndex({ userId: 1, repositoryId: 1, status: 1 }),
       this.jobs.createIndex({ userId: 1, createdAt: -1 }),
     ]);
+  }
+
+  /** Atomically excludes duplicate workers; a bounded lease permits restart recovery. */
+  async claim(jobId: string, userId: string, leaseUntil: Date) {
+    return this.jobs.findOneAndUpdate(
+      { jobId, userId, status: { $in: ["queued", "running", "failed"] },
+        $or: [{ leaseUntil: { $exists: false } }, { leaseUntil: { $lte: new Date() } }] },
+      { $set: { status: "running", leaseUntil, updatedAt: new Date() } },
+      { returnDocument: "after", projection: { _id: 0 } },
+    );
   }
 
   async create(jobId: string, userId: string, repositoryId: number, metadata = {}) {
@@ -119,6 +146,16 @@ export class MemoryAgentJobAuthorizationStore implements AgentJobAuthorizationSt
   private jobs = new Map<string, AgentJobAuthorization>();
 
   async init() {}
+
+  /** In-memory equivalent of the atomic MongoDB job claim. */
+  async claim(jobId: string, userId: string, leaseUntil: Date) {
+    const job = this.jobs.get(jobId);
+    if (!job || job.userId !== userId || !["queued", "running", "failed"].includes(job.status)
+      || (job.leaseUntil && job.leaseUntil > new Date())) return null;
+    const updated = { ...job, status: "running" as const, leaseUntil, updatedAt: new Date() };
+    this.jobs.set(jobId, updated);
+    return structuredClone(updated);
+  }
 
   async create(jobId: string, userId: string, repositoryId: number, metadata = {}) {
     if (this.jobs.has(jobId)) throw new Error("Agent job already exists");

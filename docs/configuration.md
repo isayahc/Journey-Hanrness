@@ -120,3 +120,7 @@ Repository execution requires `JOURNEY_AGENT_EXECUTION_ENABLED=1` and explicit
 per-repository agent enablement in the UI. `JOURNEY_AGENT_WORKSPACE_ROOT` optionally
 sets the temporary workspace location. Checks execute repository-owned npm
 scripts on the worker, so enable this only where that execution is intended.
+
+## Remote repository execution
+
+Use `JOURNEY_AGENT_EXECUTION_BACKEND=daytona` with `DAYTONA_API_KEY` to run repository jobs in private Daytona sandboxes. See [Daytona configuration, recovery, and live smoke testing](daytona.md). Local execution remains the development default.
