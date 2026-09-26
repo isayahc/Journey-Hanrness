@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile } from 'node:fs/promises';
 import { chromium, expect } from '@playwright/test';
+import { createChatApp } from '../src/chat/app.ts';
+import { MemoryChatStore } from '../src/chat/store.ts';
 
-test('repository jobs submit, survive reload, show results, resume, cancel, and report errors', async () => {
+test('repository jobs submit, survive reload, show results, resume, cancel, and report errors', { timeout: 30_000 }, async () => {
+  // Keep API fixtures below, but serve assets through the same handler as the app.
+  const app = createChatApp(new MemoryChatStore(), {
+    async reply() { throw new Error('Unexpected model call in repository-job fixture'); },
+  }, true, 80, undefined, 'http://journey.test');
   const browser = await chromium.launch();
+  let page;
   try {
-    const page = await browser.newPage();
+    page = await browser.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     let jobs = [];
@@ -33,26 +39,32 @@ test('repository jobs submit, survive reload, show results, resume, cancel, and 
       if (path === '/api/agent-jobs') return json(jobs);
       if (path.endsWith('/resume')) { jobs[0].status = 'running'; jobs[0].leaseUntil = new Date(Date.now() + 60000).toISOString(); return json({ status: 'resuming' }); }
       if (path.endsWith('/cancel')) { jobs[0].status = 'cancelled'; return json(jobs[0]); }
-      const file = path === '/' ? 'index.html' : path.slice(1);
-      return route.fulfill({ body: await readFile(new URL(`../public/${file}`, import.meta.url)), contentType: file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html' });
+      const response = await app(new Request(request.url(), { method: request.method() }));
+      if (!response.ok) errors.push(`${path}: HTTP ${response.status}`);
+      return route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
     });
     const open = async () => {
       await page.goto('http://journey.test/');
       await page.getByRole('button', { name: 'Repositories', exact: true }).click();
       await expect(page.locator('#agent-repository option')).toHaveCount(1);
+      assert.deepEqual(errors, [], 'Page scripts and assets must load successfully');
     };
     await open();
-    await page.locator('#agent-instruction').fill('Add tests <script>bad()</script>');
+    const instruction = 'Add **tests** <script>bad()</script><img src=x onerror="window.pwned=true">';
+    await page.locator('#agent-instruction').fill(instruction);
     await page.getByRole('button', { name: 'Start agent job' }).click();
     await expect(page.locator('#agent-job-list')).toContainText('Status: running');
-    assert.deepEqual(calls, [{ repositoryId: 1, instruction: 'Add tests <script>bad()</script>' }]);
+    assert.deepEqual(calls, [{ repositoryId: 1, instruction }]);
     await expect(page.getByRole('button', { name: 'Resume job' })).toHaveCount(0);
     await open();
     await expect(page.locator('#agent-job-list')).toContainText('Add tests');
+    await expect(page.locator('#agent-job-list .markdown strong')).toHaveText('tests');
+    await expect(page.locator('#agent-job-list script, #agent-job-list img, #agent-job-list [onerror]')).toHaveCount(0);
+    assert.equal(await page.evaluate(() => window.pwned), undefined);
     jobs[0] = { ...jobs[0], status: 'failed', leaseUntil: null, checkpoint: 'modified', failure: 'CHECKS_FAILED', summary: 'Updated tests', checks: [{ command: 'npm test', ok: false }] };
     await page.getByRole('button', { name: 'Refresh jobs' }).click();
     await expect(page.locator('#agent-job-list')).toContainText('FAIL: npm test');
-    await expect(page.locator('#agent-job-list')).toContainText('Failure: CHECKS_FAILED');
+    await expect(page.locator('#agent-job-list')).toContainText(/Failure:\s*CHECKS_FAILED/);
     await page.getByRole('button', { name: 'Resume job' }).click();
     await expect(page.locator('#agent-job-list')).toContainText('Status: running');
     await page.getByRole('button', { name: 'Cancel job' }).click();
@@ -69,5 +81,8 @@ test('repository jobs submit, survive reload, show results, resume, cancel, and 
     await page.setViewportSize({ width: 390, height: 844 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.deepEqual(errors, []);
-  } finally { await browser.close(); }
+  } finally {
+    try { if (page && !page.isClosed()) await page.unrouteAll({ behavior: 'wait' }); }
+    finally { await browser.close(); }
+  }
 });
