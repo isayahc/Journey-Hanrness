@@ -65,6 +65,10 @@ function isModelAvailabilityFailure(error: unknown) {
   ].some(signal => text.includes(signal));
 }
 
+function needsExternalSearch(content: string) {
+  return /\b(current|latest|today|news|research|official|source|sources|cite|citation|documentation|docs|search|lookup|who is|what is)\b/i.test(content);
+}
+
 export class DemoChatProvider implements ChatProvider {
   async reply(messages: Message[]) {
     return { content: `Demo response — no AI model is connected.\n\nYou said: “${messages.at(-1)?.content}”\n\nFor real replies, start OpenCode and use npm start. This demo lets you try conversations and the chat interface.` };
@@ -96,7 +100,7 @@ export class OpenCodeChatProvider implements ChatProvider {
   async reply(messages: Message[], opencodeSessionId?: string, opencodeSessionVersion?: ChatSessionVersion, scope?: SearchScope, options?: ChatReplyOptions): Promise<ChatReply> {
     const timeout = AbortSignal.timeout(5 * 60 * 1000);
     const signal = options?.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
-    const searchEnabled = !!this.search?.enabled && !!scope;
+    const searchEnabled = !!this.search?.enabled && !!scope && needsExternalSearch(messages.at(-1)?.content || "");
     // Replace legacy search permissions, including when Tavily is enabled or disabled.
     const structured = !!options?.execution;
     const sessionVersion = structured ? (searchEnabled ? 6 : 5) : (searchEnabled ? 4 : 3);
@@ -119,7 +123,6 @@ export class OpenCodeChatProvider implements ChatProvider {
           title: "journey-harness chat", permission: [
             { permission: "*", pattern: "*", action: "deny" },
             ...(searchEnabled ? [{ permission: SEARCH_TOOL, pattern: "*", action: "allow" as const }] : []),
-            { permission: "webfetch", pattern: "*", action: "allow" },
           ],
         }, { signal });
         if (!session.data) throw new Error("OpenCode did not create a session");

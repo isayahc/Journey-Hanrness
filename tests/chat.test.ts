@@ -145,7 +145,6 @@ test("OpenCode maps a chat to one persistent session", async () => {
   assert.equal(first.opencodeSessionId, 'session-test');
   assert.deepEqual(calls[0]?.body.permission, [
     { permission: '*', pattern: '*', action: 'deny' },
-    { permission: 'webfetch', pattern: '*', action: 'allow' },
   ]);
   assert.deepEqual(calls[1]?.body.model, { providerID: 'openai', modelID: 'test-model' });
   assert.match(calls[1]?.body.parts[0].text, /Hello/);
