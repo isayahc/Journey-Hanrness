@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
 
 // Exercise the shipped controller, with controllable API replies and a minimal DOM.
 class Element {
@@ -17,8 +18,10 @@ class Element {
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
-async function fixture(t) {
-  const elements = new Map(), chats = new Map(), requests = [], replies = new Map(), timers = new Set();
+async function fixture(t, persisted = {}) {
+  const elements = new Map(), chats = persisted.chats || new Map(), requests = [], replies = new Map(), timers = new Set();
+  const storage = persisted.storage || new Map();
+  let jobGate;
   const get = selector => { if (!elements.has(selector)) elements.set(selector, new Element()); return elements.get(selector); };
   let createGate;
   const fetch = async (path, options = {}) => {
@@ -34,13 +37,14 @@ async function fixture(t) {
       const chat = { id: `chat-${chats.size + 1}`, title: `Conversation ${chats.size + 1}`, messages: [], version: 0 };
       chats.set(chat.id, chat); return response(chat);
     }
-    const [, id, action] = /^\/api\/chats\/([^/]+)(?:\/(messages|cancel))?$/.exec(path) || [];
+    const [, id, action] = /^\/api\/chats\/([^/]+)(?:\/(messages|cancel|jobs))?$/.exec(path) || [];
     const chat = chats.get(id);
     assert.ok(chat, `Unknown request ${path}`);
+    if (action === 'jobs') { if (jobGate) { const gate = jobGate; jobGate = null; await gate; } return response(chat.jobs || []); }
     if (action === 'messages') return new Promise((resolve, reject) => {
-      const content = JSON.parse(options.body).content;
+      const { content, requestId } = JSON.parse(options.body);
       replies.set(id, {
-        succeed() { chat.messages.push({ role: 'user', content }, { role: 'assistant', content: `Answer for ${content}` }); chat.version++; resolve(response(chat)); },
+        succeed(job) { if (job) chat.jobs = [job]; chat.messages.push({ role: 'user', content, requestId }, { role: 'assistant', content: `Answer for ${content}`, requestId, ...(job ? { job: { jobId: job.jobId, repositoryFullName: job.repositoryFullName } } : {}) }); chat.version++; resolve(response(chat)); },
         fail(code) { resolve(response({ error: 'Test reply failed', code }, code === 'CHAT_CANCELLED' ? 409 : 502)); },
         timeout() { reject(new DOMException('Timed out', 'TimeoutError')); },
       });
@@ -52,7 +56,7 @@ async function fixture(t) {
   const context = vm.createContext({
     document: { querySelector: get, querySelectorAll: () => [], createElement: () => new Element(), createTextNode: text => ({ textContent: text }) },
     renderMarkdown(element, content) { element.textContent = content; },
-    fetch, URLSearchParams, AbortSignal, Date, window: { location: { search: '', assign() {} } },
+    fetch, URLSearchParams, AbortSignal, Date, crypto: webcrypto, window: { location: { search: '', assign() {} }, sessionStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) } },
     setInterval(fn, ms) { const id = setInterval(fn, ms); timers.add(id); return id; },
     clearInterval(id) { clearInterval(id); timers.delete(id); },
     setTimeout(fn, ms) { const id = setTimeout(fn, ms); timers.add(id); return id; },
@@ -62,7 +66,9 @@ async function fixture(t) {
   vm.runInContext(readFileSync(new URL('../public/app.js', import.meta.url), 'utf8'), context);
   await tick();
   return {
-    get, requests, replies, chats,
+    get, requests, replies, chats, storage,
+    pollJobs: () => vm.runInContext('loadChatJobs()', context),
+    delayJobs() { return new Promise(resolve => { jobGate = new Promise(release => resolve(release)); }); },
     type(content) { get('#message').value = content; get('#message').oninput(); },
     send(content) { this.type(content); return get('#composer').onsubmit({ preventDefault() {} }); },
     async select(id) { const chat = chats.get(id); await get('#history').children.find(button => button.title === chat.title).onclick(); },
@@ -173,4 +179,40 @@ test('repository job controls remain usable while a chat reply is pending', asyn
   await ui.get('#repositories-button').onclick();
   assert.equal(ui.get('#thinking').hidden, false);
   ui.replies.get('chat-1').succeed(); await sent;
+});
+
+const descendants = element => [element, ...(element.children || []).flatMap(descendants)];
+test('job cards survive reload, keep chats usable and discard late updates after navigation', async t => {
+  const ui = await fixture(t);
+  const sent = ui.send('Build'); await tick();
+  ui.replies.get('chat-1').succeed({ jobId: 'job-1', repositoryFullName: 'alice/app', status: 'running', leaseUntil: '2999-01-01' }); await sent;
+  assert.equal(ui.get('#stop').hidden, true);
+  assert.equal(ui.get('#send').disabled, false);
+  assert.ok(descendants(ui.get('#messages')).some(element => element.textContent === 'Cancel job'));
+  const reloaded = await fixture(t, { chats: ui.chats, storage: ui.storage });
+  assert.ok(descendants(reloaded.get('#messages')).some(element => element.textContent === 'Cancel job'));
+  const release = await ui.delayJobs(); const polling = ui.pollJobs();
+  ui.get('#new-chat').onclick(); ui.type('Private draft');
+  ui.chats.get('chat-1').jobs[0] = { jobId: 'job-1', status: 'completed', summary: 'Created the app', pullRequestUrl: 'https://github.com/alice/app/pull/42' };
+  release(); await polling;
+  assert.equal(ui.get('#message').value, 'Private draft');
+  assert.equal(descendants(ui.get('#messages')).some(element => element.textContent === 'View pull request'), false);
+  await ui.select('chat-1');
+  assert.ok(descendants(ui.get('#messages')).some(element => element.textContent === 'View pull request'));
+});
+
+test('retry IDs survive network failures and reload, while a changed message receives a new ID', async t => {
+  const ui = await fixture(t);
+  const sent = ui.send('Build'); await tick();
+  const id = JSON.parse(ui.requests.find(request => request.path.endsWith('/messages')).options.body).requestId;
+  ui.replies.get('chat-1').fail(); await sent;
+  const reloaded = await fixture(t, { chats: ui.chats, storage: ui.storage });
+  assert.equal(reloaded.get('#message').value, 'Build');
+  const retried = reloaded.send('Build'); await tick();
+  assert.equal(JSON.parse(reloaded.requests.find(request => request.path.endsWith('/messages')).options.body).requestId, id);
+  reloaded.replies.get('chat-1').fail(); await retried;
+  const changed = reloaded.send('Something different'); await tick();
+  assert.notEqual(JSON.parse(reloaded.requests.filter(request => request.path.endsWith('/messages')).at(-1).options.body).requestId, id);
+  reloaded.replies.get('chat-1').succeed(); await changed;
+  assert.equal(ui.storage.size, 0);
 });

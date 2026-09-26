@@ -19,3 +19,4 @@ a.sidebar-action{text-decoration:none;font-size:14px}.goals-workspace{width:min(
 .markdown-table{max-width:100%;overflow-x:auto}.markdown table{border-collapse:collapse;font-size:.94em;min-width:100%}
 .markdown th,.markdown td{border:1px solid #cbd6c6;padding:8px 12px;text-align:left}.markdown th{background:#e9f0e2;font-weight:650}
 .markdown hr{border:0;border-top:1px solid #cbd6c6;margin:1.3em 0}.markdown input[type=checkbox]{margin-right:.5em}
+.agent-job-card > .text-button{display:block;margin-top:12px}

@@ -149,7 +149,7 @@ test("chat invokes Tavily with persisted scope and exposes owner-scoped evidence
     if (path.endsWith("/message")) {
       const evidence = await search.execute("chat-session", { query: "official information" });
       assert.equal(evidence.ok, true);
-      return Response.json({ info: {}, parts: [{ type: "text", text: "See https://example.com/docs for the sourced information." }] });
+      return Response.json({ info: { structured: { content: "See https://example.com/docs for the sourced information.", execution: null } }, parts: [] });
     }
     return Response.json({ id: "chat-session" });
   };
@@ -165,7 +165,7 @@ test("chat invokes Tavily with persisted scope and exposes owner-scoped evidence
   const response = await request(`/api/chats/${chat.id}/messages`, { content: "Find official information" });
   assert.equal(response.status, 200);
   const saved = await response.json();
-  assert.equal(saved.opencodeSessionVersion, 4);
+  assert.equal(saved.opencodeSessionVersion, 6);
   const permission = calls.find(call => call.path === "/session")?.body.permission;
   assert.ok(permission.some((item: any) => item.permission === "tavily_search" && item.action === "allow"));
   assert.equal(permission.some((item: any) => item.permission === "websearch" && item.action === "allow"), false);
