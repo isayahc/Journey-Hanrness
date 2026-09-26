@@ -91,6 +91,22 @@ test("OpenCode defaults to Space Bunny when OPENCODE_MODEL is unset", async () =
   });
 });
 
+test("Baseten structured chat validates JSON text without native schema output", async () => {
+  let prompt: any;
+  const provider = new OpenCodeChatProvider({ OPENCODE_URL: "http://localhost:4096", OPENCODE_MODEL: "baseten/zai-org/GLM-5.2" }, async (input, init) => {
+    const request = new Request(input, init);
+    if (new URL(request.url).pathname.endsWith("/message")) {
+      prompt = await request.json();
+      return Response.json({ info: {}, parts: [{ type: "text", text: JSON.stringify({ content: "Hello from GLM", execution: null }) }] });
+    }
+    return Response.json({ id: "session-baseten" });
+  });
+  const reply = await provider.reply([{ role: "user", content: "Hello" }], undefined, undefined, undefined, { execution: { enabled: false } });
+  assert.equal(reply.content, "Hello from GLM");
+  assert.equal(reply.execution, null);
+  assert.equal(prompt.format, undefined);
+});
+
 test("OpenCode surfaces sanitized model availability failures", async () => {
   const fakeFetch: typeof fetch = async (input, init) => {
     const request = new Request(input, init);
