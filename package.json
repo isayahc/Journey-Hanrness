@@ -1,0 +1,39 @@
+{
+  "name": "journey-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.9.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts tests/*.test.mjs",
+    "db:init": "node --import tsx --env-file=.env src/cli.ts init",
+    "demo": "node --import tsx --env-file=.env src/cli.ts demo",
+    "worker:once": "node --import tsx --env-file=.env src/cli.ts worker",
+    "profiles": "node --import tsx --env-file=.env src/cli.ts profiles",
+    "start": "node --env-file-if-exists=.env scripts/start.mjs",
+    "chat:opencode": "npm start",
+    "chat:start": "npm start",
+    "chat:demo": "node --import tsx src/server.ts --demo",
+    "postinstall": "node scripts/setup.mjs",
+    "setup": "node scripts/setup.mjs",
+    "server": "node --import tsx --env-file-if-exists=.env src/server.ts",
+    "opencode": "node --env-file-if-exists=.env scripts/opencode.mjs",
+    "opencode:serve": "node --env-file-if-exists=.env scripts/opencode.mjs serve --hostname 127.0.0.1 --port 4096"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "1.18.32",
+    "mongodb": "^6.20.0",
+    "zod": "^3.25.76",
+    "opencode-ai": "1.18.32"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  },
+  "description": "Persistent agent conversations and controlled repository workflows"
+}
