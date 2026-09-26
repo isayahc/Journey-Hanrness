@@ -28,6 +28,39 @@ Use `OPENCODE_MODEL=opencode/space-bunny-free` or explicitly override it with a
 provider/model you can access. `npm run opencode -- models` lists availability.
 `npm run opencode -- auth login` configures provider authentication if needed.
 
+## Tavily search
+
+Set `TAVILY_API_KEY` in `.env`; no key is bundled. `npm start` passes this key and
+MongoDB configuration to both the app and its managed OpenCode process. Restart
+both services after adding, changing, or removing the key. If `npm start` reuses
+an already-running OpenCode server, restart that server yourself so it receives
+the updated environment and tool files.
+
+The tool lives at `.opencode/tools/tavily_search.ts`. OpenCode must run from this
+project with `npm install` completed. A separately managed or remote OpenCode
+server needs this tool and its `src/search/` dependencies, the same `MONGODB_URI`
+and `MONGODB_DB`, and `TAVILY_API_KEY` in its own environment. A key only in the app's
+environment does not configure a remote server. Use `npm run search:smoke` to verify
+the full integration after setup. It uses live inference/search and may consume
+provider quota. The normal test suite uses fixtures and requires no Tavily key.
+
+Search is currently enabled for chat and goal planning. Repository jobs retain
+their existing tool permissions. Search is disabled when the key is missing;
+page fetching in chat remains separate. The default model stays
+`opencode/space-bunny-free`.
+
+Limits are enforced by the server/tool: 400 characters per query, 1–5 results,
+1,000 characters per excerpt, a 512 KB upstream response cap, a 10-second request
+timeout, and 10 provider attempts per conversation/run. A planning retry or app
+restart does not reset the budget. No automatic provider retry is performed.
+
+Evidence is retained with the conversation/run until its records are explicitly
+removed; there is no automatic evidence expiration in this increment. Inspect it
+through the owner-scoped `GET /api/chats/:id/evidence` and
+`GET /api/runs/:id/evidence` endpoints. Missing/expired search authorization and
+exhausted budgets stop the tool before a provider call. Key/quota/timeout failures
+are recorded with sanitized messages and do not erase the conversation or goal.
+
 ## GitHub sign-in
 
 Set `APP_ORIGIN`, `GITHUB_APP_CLIENT_ID`, and `GITHUB_APP_CLIENT_SECRET`.

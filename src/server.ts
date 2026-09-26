@@ -10,6 +10,9 @@ import { connectDatabase } from "./db.js";
 import { MemoryRunStore, MongoRunStore } from "./runs/store.js";
 import { DemoRunPlanner, OpenCodeRunPlanner } from "./runs/planner.js";
 import { RunService } from "./runs/service.js";
+import { MongoSearchStore } from "./search/store.js";
+import { SearchService } from "./search/service.js";
+import { TavilyClient } from "./search/tavily.js";
 import { createChatApp, type AuthRuntime, type GitHubAppRuntime } from "./chat/app.js";
 import { DemoChatProvider, OpenCodeChatProvider } from "./chat/provider.js";
 import { MemoryChatStore, MongoChatStore, type Conversation } from "./chat/store.js";
@@ -37,13 +40,15 @@ async function main() {
   const origin = new URL(appOrigin);
   if (!["http:", "https:"].includes(origin.protocol) || origin.pathname !== "/") throw new Error("APP_ORIGIN must be an http(s) origin without a path");
 
-  const provider = demo ? new DemoChatProvider() : new OpenCodeChatProvider();
   const db = demo ? undefined : await connectDatabase();
+  const search = db ? new SearchService(new MongoSearchStore(db.database), new TavilyClient()) : undefined;
+  await search?.store.init();
+  const provider = demo ? new DemoChatProvider() : new OpenCodeChatProvider(process.env, fetch, search);
   const store = db ? new MongoChatStore(db.database.collection<Conversation>("chat_conversations")) : new MemoryChatStore();
   if (store instanceof MongoChatStore) await store.init();
   const runStore = db ? new MongoRunStore(db.runs) : new MemoryRunStore();
   await runStore.init();
-  const runs = new RunService(runStore, demo ? new DemoRunPlanner() : new OpenCodeRunPlanner());
+  const runs = new RunService(runStore, demo ? new DemoRunPlanner() : new OpenCodeRunPlanner(process.env, fetch, search));
 
   const github = githubOAuthFromEnv(origin.origin);
   let auth: AuthRuntime | undefined;
@@ -114,7 +119,7 @@ async function main() {
     throw new Error("GITHUB_APP_SLUG requires GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET");
   }
 
-  const app = createChatApp(store, provider, demo, port, auth, origin.origin, githubApp, runs);
+  const app = createChatApp(store, provider, demo, port, auth, origin.origin, githubApp, runs, search);
   const allowedHosts = new Set([origin.host]);
   if (origin.protocol === "http:" && ["localhost", "127.0.0.1"].includes(origin.hostname)) {
     const localPort = origin.port || String(port);

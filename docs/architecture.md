@@ -17,7 +17,8 @@ The HTTP app owns browser sessions, validates message input, and stores
 conversations in MongoDB. Each conversation retains its OpenCode session ID.
 Messages are sent through the SDK with an explicit model and a 90-second timeout.
 
-Chat sessions deny tools by default, then allow `websearch` and `webfetch`.
+Chat sessions deny tools by default, then allow `webfetch` and, when configured,
+the project `tavily_search` tool. Built-in `websearch` is not enabled for these sessions.
 They cannot modify files or run shell commands. Model and connectivity errors
 return useful status without discarding the user's saved conversation.
 
@@ -34,7 +35,7 @@ dependencies, instructions, and proposed objective verification requirements.
 
 `POST /api/runs` saves a draft before any model call. `POST /api/runs/:id/plan`
 claims a planning attempt and requests a JSON plan from a fresh OpenCode session
-with all tools denied. The model is taken from the saved run. The server validates
+with execution tools denied and optional Tavily search. The model is taken from the saved run. The server validates
 shape, field bounds, step limits, unique IDs, and dependency ordering before saving
 the plan. A plan does not constitute evidence of completed work.
 
@@ -51,6 +52,30 @@ anonymous browser owner. Mutation routes require same-origin JSON requests.
 The `/goals` interface displays criteria, stored limits, status, and the plan.
 Execution attempts and time budgets are stored for the upcoming step executor;
 this increment does not execute steps, claim task completion, or evaluate results.
+
+## Search evidence
+
+The OpenCode custom tool delegates to `src/search/`, which calls Tavily's search
+API with server-side credentials. Tool arguments contain only the query and result
+count. The trusted OpenCode session ID resolves a short-lived authorization stored
+in `search_contexts`; the model cannot select an owner, conversation, or goal.
+The app binds a session before inference and releases it afterward. Bindings expire
+after two minutes if the app stops. Attempt tokens keep stale cleanup from revoking
+a newer request. A context retains its atomic usage counter across sessions/restarts.
+
+Results and sanitized failures are saved in `search_evidence` before returning to
+the model. Every record is scoped to its owner and conversation/run, with an ID,
+query, retrieval time, and bounded sources. Authenticated evidence routes verify
+resource ownership before reading. Previous evidence is supplied when a chat
+continues or a goal retries planning. Search failure does not complete a run or
+discard its goal; the agent can report the limitation or plan a later research step.
+
+Chat sessions are recreated when search permissions change, carrying the saved
+transcript into the new session. Session version 3 has page fetching and no search;
+version 4 adds Tavily. Repository agents are not granted this search tool yet.
+
+API contracts: [Tavily search](https://docs.tavily.com/documentation/api-reference/endpoint/search)
+and [OpenCode custom tools](https://opencode.ai/docs/custom-tools/).
 
 ## Repository jobs
 
