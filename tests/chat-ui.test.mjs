@@ -51,6 +51,7 @@ async function fixture(t) {
   get('#agent-job-form').elements = ['#agent-repository', '#agent-instruction', '#submit-agent-job'].map(get);
   const context = vm.createContext({
     document: { querySelector: get, querySelectorAll: () => [], createElement: () => new Element(), createTextNode: text => ({ textContent: text }) },
+    renderMarkdown(element, content) { element.textContent = content; },
     fetch, URLSearchParams, AbortSignal, Date, window: { location: { search: '', assign() {} } },
     setInterval(fn, ms) { const id = setInterval(fn, ms); timers.add(id); return id; },
     clearInterval(id) { clearInterval(id); timers.delete(id); },

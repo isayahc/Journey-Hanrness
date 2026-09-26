@@ -59,7 +59,11 @@ function renderMessage(message, pending = false) {
   article.className = `message ${message.role}${pending ? ' pending' : ''}`;
   const speaker = document.createElement('span');
   speaker.className = 'speaker'; speaker.textContent = message.role === 'user' ? 'YOU' : 'journey-harness';
-  article.append(speaker, document.createTextNode(message.content));
+  const body = document.createElement('div');
+  body.className = 'message-content';
+  if (message.role === 'assistant') renderMarkdown(body, message.content);
+  else body.textContent = message.content;
+  article.append(speaker, body);
   $('#messages').append(article);
 }
 function render() {
