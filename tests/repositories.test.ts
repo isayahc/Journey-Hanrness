@@ -102,7 +102,7 @@ class FakeOAuth {
 }
 class NoopVerifier implements GitHubInstallationVerifier {
   installationAuthorizationUrl() { return "https://github.example/verify"; }
-  async verifyInstallationCode() { return { profile: { id: 100, login: "alice" }, installation: null }; }
+  async verifyInstallationCode() { return { profile: { id: 100, login: "alice" }, installations: [] }; }
 }
 class MutableRepoClient implements GitHubAppRepositoryClient {
   byInstallation = new Map<number, ReturnType<typeof repo>[]>();
@@ -142,7 +142,7 @@ async function runtime() {
       repositoryClient,
     },
   );
-  return { app, identity, session, repositoryStore, repositoryClient };
+  return { app, identity, session, installations, repositoryStore, repositoryClient };
 }
 
 function post(path: string, token: string, body: unknown) {
@@ -176,6 +176,18 @@ test("repository API syncs, enables, and blocks stale repositories", async () =>
 
   const staleEnable = await state.app(post("/api/github/repositories/1/agent-access", state.session.token, { enabled: true }));
   assert.equal(staleEnable.status, 404);
+});
+
+test("sync requests reconnection for unavailable installations and revokes stale repository access", async () => {
+  const state = await runtime();
+  await state.app(post("/api/github/repositories/sync", state.session.token, {}));
+  await state.repositoryStore.setAgentEnabled(state.identity.userId, 1, true);
+  state.repositoryClient.listInstallationRepositories = async () => { throw new Error("GITHUB_INSTALLATION_UNAVAILABLE"); };
+  const response = await state.app(post("/api/github/repositories/sync", state.session.token, {}));
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, "GITHUB_CONNECTION_REQUIRED");
+  assert.deepEqual(await state.repositoryStore.listForUser(state.identity.userId), []);
+  assert.equal(await state.repositoryStore.authorizeAgentRepository(state.identity.userId, 1), null);
 });
 
 test("repository API is isolated between authenticated users", async () => {

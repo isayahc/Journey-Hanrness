@@ -10,7 +10,11 @@ async function api(path, body) {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Something went wrong. Please try again.');
+  if (!response.ok) {
+    const error = new Error(data.error || 'Something went wrong. Please try again.');
+    error.code = data.code;
+    throw error;
+  }
   return data;
 }
 function showError(error) { $('#error').textContent = error.message; $('#error').hidden = false; }
@@ -165,9 +169,15 @@ $('#sync-repositories').onclick = async () => {
   try {
     const repositories = await api('/api/github/repositories/sync', {});
     renderRepositories(repositories);
-    $('#repo-sync-note').textContent = 'Repository access refreshed from GitHub.';
+    $('#repo-sync-note').textContent = repositories.length
+      ? 'Repository access refreshed from GitHub.'
+      : 'GitHub is connected, but no repositories are available. Check your selected repositories under Change GitHub access.';
     $('#repo-sync-note').hidden = false;
   } catch (error) {
+    if (error.code === 'GITHUB_CONNECTION_REQUIRED') {
+      window.location.assign('/github/connect');
+      return;
+    }
     $('#repo-sync-note').textContent = error.message;
     $('#repo-sync-note').hidden = false;
   } finally { setBusy(false); }
@@ -235,7 +245,10 @@ async function init() {
         $('#connect-github').hidden = false;
         $('#repositories-button').hidden = false;
         const installations = await api('/api/github/installations');
-        if (installations.length) $('#connect-github').textContent = `GitHub · ${installations.length} installation${installations.length === 1 ? '' : 's'}`;
+        if (installations.length) {
+          $('#connect-github').textContent = `GitHub · ${installations.length} installation${installations.length === 1 ? '' : 's'}`;
+          $('#connect-github').href = '/github/install';
+        }
       }
       $('#sync-repositories').disabled = !githubRepoSyncEnabled;
       if (!githubRepoSyncEnabled) {
@@ -251,6 +264,10 @@ async function init() {
     const chats = await refreshHistory();
     if (chats.length) current = await api(`/api/chats/${chats[0].id}`);
     render();
+    if (githubResult === 'connected' && status.githubAppEnabled) {
+      setRepositoryMode(true);
+      await loadRepositories();
+    }
   } catch (error) { showError(error); $('#mode').textContent = 'Unavailable'; }
   finally { setBusy(false); }
 }

@@ -73,10 +73,13 @@ function installationPermissionsAreSufficient(permissions: Record<string, string
 async function syncGitHubRepositories(githubApp: GitHubAppRuntime, userId: string) {
   if (!githubApp.repositoryClient) throw new Error("GitHub repository synchronization is not configured.");
   const installations = await githubApp.store.listForUser(userId);
+  if (!installations.length) throw new Error("GITHUB_CONNECTION_REQUIRED");
+  let available = 0;
   for (const installation of installations) {
     try {
       const repositories = await githubApp.repositoryClient.listInstallationRepositories(installation.installationId);
       await githubApp.repositoryStore.syncInstallation(userId, installation.installationId, repositories);
+      available++;
     } catch (error) {
       if (error instanceof Error && error.message === "GITHUB_INSTALLATION_UNAVAILABLE") {
         await githubApp.repositoryStore.syncInstallation(userId, installation.installationId, []);
@@ -85,6 +88,7 @@ async function syncGitHubRepositories(githubApp: GitHubAppRuntime, userId: strin
       throw error;
     }
   }
+  if (!available) throw new Error("GITHUB_CONNECTION_REQUIRED");
   return githubApp.repositoryStore.listForUser(userId);
 }
 
@@ -229,13 +233,14 @@ export function createChatApp(
         return redirect(`https://github.com/apps/${githubApp.slug}/installations/new`);
       }
 
-      if (request.method === "GET" && url.pathname === "/github/setup") {
+      if (request.method === "GET" && ["/github/setup", "/github/connect"].includes(url.pathname)) {
         if (!auth || !githubApp) return redirect("/?github=unavailable");
         const user = await sessionUser();
         if (!user) return redirect("/?github=signin");
-        if (url.searchParams.get("setup_action") === "request") return redirect("/?github=requested");
-        const installationId = Number(url.searchParams.get("installation_id"));
-        if (!Number.isSafeInteger(installationId) || installationId <= 0) return redirect("/?github=failed");
+        const discovering = url.pathname === "/github/connect";
+        if (!discovering && url.searchParams.get("setup_action") === "request") return redirect("/?github=requested");
+        const installationId = discovering ? null : Number(url.searchParams.get("installation_id"));
+        if (installationId !== null && (!Number.isSafeInteger(installationId) || installationId <= 0)) return redirect("/?github=failed");
         const state = await githubApp.store.createVerificationState(user.userId, installationId);
         headers.append("Set-Cookie", setCookie(INSTALL_STATE_COOKIE, state, {
           maxAge: 600,
@@ -253,19 +258,23 @@ export function createChatApp(
         if (!user) return redirect("/?github=signin");
         const state = url.searchParams.get("state") || "";
         const code = url.searchParams.get("code") || "";
-        const installationId = state && code
+        const verification = state && code
           ? await githubApp.store.consumeVerificationState(state, requestCookies[INSTALL_STATE_COOKIE], user.userId)
           : null;
-        if (!installationId) return json({ error: "GitHub installation verification state is invalid or expired." }, 400);
+        if (!verification) return json({ error: "GitHub installation verification state is invalid or expired." }, 400);
+        const { installationId } = verification;
         try {
-          const verified = await githubApp.verifier.verifyInstallationCode(code, installationCallbackUrl, installationId);
+          const verified = await githubApp.verifier.verifyInstallationCode(code, installationCallbackUrl, installationId, githubApp.slug);
           if (verified.profile.id !== user.githubUserId) return redirect("/?github=account-mismatch");
-          if (!verified.installation) return redirect("/?github=unauthorized");
-          if (!installationPermissionsAreSufficient(verified.installation.permissions)) return redirect("/?github=permissions");
-          await githubApp.store.linkInstallation(user.userId, verified.installation);
-          if (githubApp.repositoryClient) {
-            const repositories = await githubApp.repositoryClient.listInstallationRepositories(installationId);
-            await githubApp.repositoryStore.syncInstallation(user.userId, installationId, repositories);
+          if (!verified.installations.length) return redirect(installationId === null ? "/github/install" : "/?github=unauthorized");
+          const installations = verified.installations.filter(item => installationPermissionsAreSufficient(item.permissions));
+          if (!installations.length) return redirect("/?github=permissions");
+          for (const installation of installations) {
+            if (githubApp.repositoryClient) {
+              const repositories = await githubApp.repositoryClient.listInstallationRepositories(installation.installationId);
+              await githubApp.repositoryStore.syncInstallation(user.userId, installation.installationId, repositories);
+            }
+            await githubApp.store.linkInstallation(user.userId, installation);
           }
           return redirect("/?github=connected");
         } catch (error) {
@@ -299,6 +308,12 @@ export function createChatApp(
         try {
           return json(await syncGitHubRepositories(githubApp, user.userId));
         } catch (error) {
+          if (error instanceof Error && error.message === "GITHUB_CONNECTION_REQUIRED") {
+            return json({
+              error: "Reconnect GitHub to verify your existing installation and sync repositories.",
+              code: "GITHUB_CONNECTION_REQUIRED",
+            }, 409);
+          }
           console.error("[github-app] repository sync failed", { userId: user.userId, error: error instanceof Error ? error.message : String(error) });
           return json({ error: "GitHub repository synchronization failed." }, 502);
         }

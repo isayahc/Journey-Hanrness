@@ -37,25 +37,27 @@ class FakeVerifier implements GitHubInstallationVerifier {
     return url.toString();
   }
 
-  async verifyInstallationCode(_code: string, _callbackUrl: string, installationId: number) {
+  async verifyInstallationCode(_code: string, _callbackUrl: string, installationId: number | null) {
     return {
       profile: { id: this.profileId, login: this.profileId === 100 ? "alice" : "someone-else" },
-      installation: this.installation?.installationId === installationId ? this.installation : null,
+      installations: this.installation && (installationId === null || this.installation.installationId === installationId) ? [this.installation] : [],
     };
   }
 }
 
-async function authenticatedRuntime() {
+async function authenticatedRuntime(withRepositorySync = false) {
   const auth = new MemoryAuthStore();
   const identity = await auth.bindGitHubUser({ id: 100, login: "alice" });
   const session = await auth.createSession(identity.userId);
   const installations = new MemoryGitHubInstallationStore();
   const verifier = new FakeVerifier();
+  const repositories = new MemoryConnectedRepositoryStore();
   return {
     identity,
     session,
     verifier,
     installations,
+    repositories,
     app: createChatApp(
       new MemoryChatStore(),
       new DemoChatProvider(),
@@ -63,7 +65,12 @@ async function authenticatedRuntime() {
       3000,
       { store: auth, github: new FakeOAuth() },
       "http://localhost:3000",
-      { slug: "journey-harness", store: installations, verifier, repositoryStore: new MemoryConnectedRepositoryStore() },
+      { slug: "journey-harness", store: installations, verifier, repositoryStore: repositories,
+        ...(withRepositorySync ? { repositoryClient: { async listInstallationRepositories(id: number) {
+          assert.equal(id, 42);
+          return [{ repositoryId: 7, fullName: "example-org/project", defaultBranch: "main", private: true, archived: false }];
+        } } } : {}),
+      },
     ),
   };
 }
@@ -199,6 +206,60 @@ test("organization install requests return a useful pending state", async () => 
   assert.equal(response.headers.get("location"), "/?github=requested");
 });
 
+async function startRecovery(runtime: Awaited<ReturnType<typeof authenticatedRuntime>>) {
+  const response = await runtime.app(new Request("http://localhost:3000/github/connect?installation_id=99", {
+    headers: sessionHeaders(runtime.session.token),
+  }));
+  assert.equal(response.status, 302);
+  const state = new URL(response.headers.get("location")!).searchParams.get("state")!;
+  assert.equal(cookieValue(response, "journey_install_state"), state);
+  return new Request(`http://localhost:3000/github/setup/callback?code=verify-code&state=${state}`, {
+    headers: { cookie: `journey_session=${runtime.session.token}; journey_install_state=${state}` },
+  });
+}
+
+test("reconnect recovers an existing installation without a setup redirect and syncs repositories", async () => {
+  const runtime = await authenticatedRuntime(true);
+  const sync = await runtime.app(new Request("http://localhost:3000/api/github/repositories/sync", {
+    method: "POST", headers: { ...sessionHeaders(runtime.session.token), origin: "http://localhost:3000", "content-type": "application/json" }, body: "{}",
+  }));
+  assert.equal(sync.status, 409);
+  assert.equal((await sync.json()).code, "GITHUB_CONNECTION_REQUIRED");
+  const request = await startRecovery(runtime);
+  const response = await runtime.app(request.clone());
+  assert.equal(response.headers.get("location"), "/?github=connected");
+  assert.equal((await runtime.installations.listForUser(runtime.identity.userId))[0]?.installationId, 42);
+  const repositories = await runtime.repositories.listForUser(runtime.identity.userId);
+  assert.equal(repositories[0]?.repositoryId, 7);
+  assert.equal(repositories[0]?.agentEnabled, false);
+  assert.deepEqual(await runtime.repositories.listForUser("other-user"), []);
+  assert.equal((await runtime.app(request)).status, 400, "verification cannot be replayed");
+});
+
+test("reconnect rejects account mismatch, missing cookies and insufficient permissions", async () => {
+  for (const failure of ["account", "cookie", "permissions"] as const) {
+    const runtime = await authenticatedRuntime(true);
+    const request = await startRecovery(runtime);
+    if (failure === "account") runtime.verifier.profileId = 101;
+    if (failure === "cookie") request.headers.set("cookie", `journey_session=${runtime.session.token}`);
+    if (failure === "permissions") runtime.verifier.installation!.permissions.contents = "read";
+    const response = await runtime.app(request);
+    if (failure === "cookie") assert.equal(response.status, 400);
+    else assert.equal(response.headers.get("location"), `/?github=${failure === "account" ? "account-mismatch" : "permissions"}`);
+    assert.deepEqual(await runtime.installations.listForUser(runtime.identity.userId), []);
+    assert.deepEqual(await runtime.repositories.listForUser(runtime.identity.userId), []);
+  }
+});
+
+test("reconnect requires sign-in and offers installation when GitHub has no existing access", async () => {
+  const runtime = await authenticatedRuntime();
+  assert.equal((await runtime.app(new Request("http://localhost:3000/github/connect"))).headers.get("location"), "/?github=signin");
+  runtime.verifier.installation = null;
+  const response = await runtime.app(await startRecovery(runtime));
+  assert.equal(response.headers.get("location"), "/github/install");
+  assert.deepEqual(await runtime.installations.listForUser(runtime.identity.userId), []);
+});
+
 test("Mongo installation store persists verified links and one-time state", { skip: !process.env.MONGODB_TEST_URI }, async () => {
   const client = new MongoClient(process.env.MONGODB_TEST_URI!);
   await client.connect();
@@ -211,8 +272,12 @@ test("Mongo installation store persists verified links and one-time state", { sk
     await store.init();
     const state = await store.createVerificationState("user-a", 42);
     assert.equal(await store.consumeVerificationState(state, state, "user-b"), null);
-    assert.equal(await store.consumeVerificationState(state, state, "user-a"), 42);
+    assert.deepEqual(await store.consumeVerificationState(state, state, "user-a"), { installationId: 42 });
     assert.equal(await store.consumeVerificationState(state, state, "user-a"), null);
+    const recoveryState = await store.createVerificationState("user-a", null);
+    assert.equal(await store.consumeVerificationState(recoveryState, "wrong", "user-a"), null);
+    assert.deepEqual(await store.consumeVerificationState(recoveryState, recoveryState, "user-a"), { installationId: null });
+    assert.equal(await store.consumeVerificationState(recoveryState, recoveryState, "user-a"), null);
 
     await store.linkInstallation("user-a", {
       installationId: 42,

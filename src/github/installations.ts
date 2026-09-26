@@ -23,15 +23,16 @@ export interface GitHubInstallationLink {
 export interface GitHubInstallationState {
   stateHash: string;
   userId: string;
-  installationId: number;
+  // null discovers existing installations after a fresh GitHub authorization.
+  installationId: number | null;
   createdAt: Date;
   expiresAt: Date;
 }
 
 export interface GitHubInstallationStore {
   init(): Promise<void>;
-  createVerificationState(userId: string, installationId: number): Promise<string>;
-  consumeVerificationState(state: string, cookieState: string | undefined, userId: string): Promise<number | null>;
+  createVerificationState(userId: string, installationId: number | null): Promise<string>;
+  consumeVerificationState(state: string, cookieState: string | undefined, userId: string): Promise<{ installationId: number | null } | null>;
   linkInstallation(userId: string, installation: VerifiedGitHubInstallation): Promise<GitHubInstallationLink>;
   listForUser(userId: string): Promise<GitHubInstallationLink[]>;
   findByInstallationId(installationId: number): Promise<GitHubInstallationLink[]>;
@@ -61,7 +62,7 @@ export class MongoGitHubInstallationStore implements GitHubInstallationStore {
     ]);
   }
 
-  async createVerificationState(userId: string, installationId: number) {
+  async createVerificationState(userId: string, installationId: number | null) {
     const state = secret();
     const now = new Date();
     await this.states.insertOne({
@@ -81,7 +82,7 @@ export class MongoGitHubInstallationStore implements GitHubInstallationStore {
       userId,
       expiresAt: { $gt: new Date() },
     });
-    return record?.installationId ?? null;
+    return record ? { installationId: record.installationId } : null;
   }
 
   async linkInstallation(userId: string, installation: VerifiedGitHubInstallation) {
@@ -148,7 +149,7 @@ export class MemoryGitHubInstallationStore implements GitHubInstallationStore {
 
   async init() {}
 
-  async createVerificationState(userId: string, installationId: number) {
+  async createVerificationState(userId: string, installationId: number | null) {
     const state = secret();
     const now = new Date();
     this.states.set(hash(state), {
@@ -164,7 +165,7 @@ export class MemoryGitHubInstallationStore implements GitHubInstallationStore {
     const record = this.states.get(key);
     if (!record || record.userId !== userId || record.expiresAt <= new Date()) return null;
     this.states.delete(key);
-    return record.installationId;
+    return { installationId: record.installationId };
   }
 
   async linkInstallation(userId: string, installation: VerifiedGitHubInstallation) {

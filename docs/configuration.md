@@ -84,6 +84,20 @@ Set `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` to synchronize repositories and
 mint scoped installation credentials. The server verifies that an installation
 belongs to the signed-in GitHub user before accepting the connection.
 
+If GitHub already has the app installed but the repository list is empty, use
+**Reconnect GitHub** on the Repositories page. This authorizes the same GitHub
+account again, discovers the app's existing installations, and saves their links
+in the current MongoDB database. **Sync from GitHub** starts this recovery
+automatically when no installation is linked. New users without an installation
+continue to GitHub's installation screen. **Change GitHub access** still opens
+GitHub's repository selection settings.
+
+All GitHub credentials and the slug must belong to the same GitHub App. Keep both
+callback URLs above registered with the exact `APP_ORIGIN` you open in the browser.
+Recovery uses the existing setup callback; no new callback URL is required. User
+access tokens are discarded after verification, and recovered repositories still
+require explicit agent enablement.
+
 Set `GITHUB_APP_WEBHOOK_SECRET` and use `${APP_ORIGIN}/webhooks/github` as the
 JSON webhook endpoint. Subscribe to installation and installation-repository
 events so removal, suspension, and deletion revoke access.
