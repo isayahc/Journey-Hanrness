@@ -165,6 +165,7 @@ export function createChatApp(
           storage: demo ? "memory" : "mongodb",
           authEnabled: Boolean(auth),
           githubAppEnabled: Boolean(auth && githubApp),
+          agentJobsEnabled: Boolean(auth && githubApp?.repositoryExecutor && githubApp.jobStore),
           githubRepoSyncEnabled: Boolean(auth && githubApp?.repositoryClient),
           githubWebhookEnabled: Boolean(githubApp?.webhook),
           agentCredentialBrokerEnabled: Boolean(githubApp?.credentialBroker),
@@ -331,6 +332,13 @@ export function createChatApp(
         const repository = await githubApp.repositoryStore.setAgentEnabled(user.userId, repositoryId, input.enabled);
         if (!repository) return json({ error: "Repository not found or no longer available." }, 404);
         return json(repository);
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/agent-jobs") {
+        if (!auth || !githubApp?.jobStore) return json({ error: "Agent jobs are not configured." }, 503);
+        const user = await sessionUser();
+        if (!user) return json({ error: "Sign in with GitHub to continue." }, 401);
+        return json(await githubApp.jobStore.listForUser(user.userId));
       }
 
       if (request.method === "POST" && url.pathname === "/api/agent-jobs") {

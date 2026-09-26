@@ -4,6 +4,12 @@ let busy = false;
 let authBlocked = false;
 let repositoryMode = false;
 let githubRepoSyncEnabled = false;
+let agentJobsEnabled = false;
+let jobPending = false;
+let jobsLoading = false;
+let jobsTimer;
+let enabledRepositories = [];
+
 
 async function api(path, body) {
   const response = await fetch(path, body === undefined ? {} : {
@@ -67,6 +73,7 @@ function setRepositoryMode(value) {
   $('#chat-workspace').hidden = value || authBlocked;
   $('#workspace-title').textContent = value ? 'Repositories' : 'Chat';
   $('#repositories-button').textContent = value ? '← Back to chat' : 'Repositories';
+  clearTimeout(jobsTimer);
   if (!value) render();
 }
 async function refreshHistory() {
@@ -88,6 +95,15 @@ async function refreshHistory() {
   return chats;
 }
 function renderRepositories(repositories) {
+  enabledRepositories = repositories.filter(repository => repository.agentEnabled && !repository.archived);
+  const selected = $('#agent-repository').value;
+  $('#agent-repository').replaceChildren(...enabledRepositories.map(repository => {
+    const option = document.createElement('option');
+    option.value = String(repository.repositoryId); option.textContent = repository.fullName;
+    return option;
+  }));
+  if (enabledRepositories.some(repository => String(repository.repositoryId) === selected)) $('#agent-repository').value = selected;
+  updateJobControls();
   $('#repository-list').replaceChildren();
   if (!repositories.length) {
     const empty = document.createElement('p');
@@ -134,6 +150,7 @@ function renderRepositories(repositories) {
 async function loadRepositories() {
   const repositories = await api('/api/github/repositories');
   renderRepositories(repositories);
+  await loadAgentJobs();
   return repositories;
 }
 function setBusy(value) {
@@ -142,6 +159,7 @@ function setBusy(value) {
   for (const element of document.querySelectorAll('[data-always-disabled="true"]')) element.disabled = true;
   $('#sync-repositories').disabled = value || authBlocked || !githubRepoSyncEnabled;
   $('#logout').disabled = value;
+  updateJobControls();
   $('#thinking').hidden = !value;
 }
 $('#new-chat').onclick = async () => {
@@ -218,6 +236,7 @@ async function init() {
   try {
     const status = await api('/api/status');
     githubRepoSyncEnabled = !!status.githubRepoSyncEnabled;
+    agentJobsEnabled = !!status.agentJobsEnabled;
     $('#mode').textContent = status.demo ? 'Demo · No AI connected' : status.webSearch?.configured ? 'OpenCode · Tavily' : 'OpenCode · Search off';
     const params = new URLSearchParams(window.location.search);
     const authProblem = params.get('auth');
@@ -271,4 +290,90 @@ async function init() {
   } catch (error) { showError(error); $('#mode').textContent = 'Unavailable'; }
   finally { setBusy(false); }
 }
+/** Keep job controls independent of chat requests and repository sync. */
+function updateJobControls() {
+  const blocked = busy || authBlocked || jobPending || !agentJobsEnabled;
+  for (const element of $('#agent-job-form').elements) element.disabled = blocked || !enabledRepositories.length;
+  $('#refresh-agent-jobs').disabled = blocked || jobsLoading;
+  for (const element of document.querySelectorAll('[data-job-action]')) element.disabled = blocked;
+  $('#agent-job-note').textContent = !agentJobsEnabled
+    ? 'Repository agent execution is not configured for this deployment.'
+    : !enabledRepositories.length ? 'Enable agent access on a repository above to start a job.' : 'Jobs run in the background. Status refreshes automatically while this page is open.';
+}
+function jobError(error) {
+  $('#agent-job-error').textContent = error.message;
+  $('#agent-job-error').hidden = false;
+}
+/** Render untrusted job output as text; only allow GitHub pull-request links. */
+function renderAgentJobs(jobs) {
+  const list = $('#agent-job-list');
+  list.replaceChildren();
+  if (!jobs.length) { list.textContent = 'No agent jobs yet.'; return; }
+  for (const job of jobs) {
+    const card = document.createElement('article'); card.className = 'agent-job-card';
+    const heading = document.createElement('h4'); heading.textContent = job.repositoryFullName || `Repository ${job.repositoryId}`;
+    card.append(heading);
+    for (const text of [job.request, `Status: ${job.status} · Checkpoint: ${job.checkpoint || 'Not started'}`, `Job: ${job.jobId}`, job.branch && `Branch: ${job.branch}`, job.summary && `Summary: ${job.summary}`, job.failure && `Failure: ${job.failure}`]) {
+      if (!text) continue;
+      const paragraph = document.createElement('p'); paragraph.textContent = text; card.append(paragraph);
+    }
+    const checks = document.createElement('ul');
+    for (const check of job.checks || []) {
+      const item = document.createElement('li'); item.textContent = `${check.ok ? 'PASS' : 'FAIL'}: ${check.command}`; checks.append(item);
+    }
+    if (!checks.children.length) { const item = document.createElement('li'); item.textContent = 'No checks reported yet.'; checks.append(item); }
+    card.append(checks);
+    if (job.pullRequestUrl && /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(job.pullRequestUrl)) {
+      const link = document.createElement('a'); link.href = job.pullRequestUrl; link.textContent = 'View pull request'; link.target = '_blank'; link.rel = 'noopener noreferrer'; card.append(link);
+    }
+    const active = ['queued', 'running', 'failed'].includes(job.status);
+    if (active) {
+      const actions = document.createElement('div'); actions.className = 'repo-actions';
+      for (const action of ['resume', 'cancel']) {
+        if (action === 'resume' && job.leaseUntil && new Date(job.leaseUntil) > new Date()) continue;
+        const button = document.createElement('button'); button.type = 'button'; button.dataset.jobAction = action;
+        button.textContent = action === 'resume' ? 'Resume job' : 'Cancel job';
+        button.onclick = () => actOnJob(job.jobId, action); actions.append(button);
+      }
+      card.append(actions);
+    }
+    list.append(card);
+  }
+  updateJobControls();
+}
+/** Fetch persisted owner-scoped history without overlapping polling requests. */
+async function loadAgentJobs() {
+  if (!agentJobsEnabled || jobsLoading) return;
+  clearTimeout(jobsTimer); jobsLoading = true; updateJobControls();
+  try {
+    const jobs = await api('/api/agent-jobs');
+    renderAgentJobs(jobs);
+    $('#agent-job-updates').textContent = `${jobs.length} jobs loaded.`;
+  } catch (error) { jobError(error); }
+  finally {
+    jobsLoading = false; updateJobControls();
+    if (repositoryMode && !authBlocked) jobsTimer = setTimeout(loadAgentJobs, 5000);
+  }
+}
+async function actOnJob(jobId, action) {
+  if (jobPending || busy || authBlocked) return;
+  jobPending = true; updateJobControls(); $('#agent-job-error').hidden = true;
+  try { await api(`/api/agent-jobs/${jobId}/${action}`, {}); await loadAgentJobs(); }
+  catch (error) { jobError(error); }
+  finally { jobPending = false; updateJobControls(); }
+}
+$('#refresh-agent-jobs').onclick = loadAgentJobs;
+$('#agent-job-form').onsubmit = async event => {
+  event.preventDefault();
+  const instruction = $('#agent-instruction').value.trim();
+  const repositoryId = Number($('#agent-repository').value);
+  if (jobPending || busy || authBlocked || !agentJobsEnabled || !instruction || !enabledRepositories.some(repository => repository.repositoryId === repositoryId)) return;
+  jobPending = true; updateJobControls(); $('#agent-job-error').hidden = true;
+  try {
+    await api('/api/agent-jobs', { repositoryId, instruction });
+    $('#agent-instruction').value = '';
+    await loadAgentJobs();
+  } catch (error) { jobError(error); }
+  finally { jobPending = false; updateJobControls(); }
+};
 init();

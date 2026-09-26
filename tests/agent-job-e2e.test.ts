@@ -235,6 +235,13 @@ test("authenticated repository enablement reaches branch push and pull request e
     }));
     assert.equal(createdResponse.status, 202);
     const created = await createdResponse.json();
+    const history = await app(request("/api/agent-jobs", session.token));
+    assert.equal(history.status, 200);
+    assert.deepEqual((await history.json()).map((job: { jobId: string }) => job.jobId), [created.jobId]);
+    const other = await auth.bindGitHubUser({ id: 98765, login: "other" });
+    const otherSession = await auth.createSession(other.userId);
+    assert.deepEqual(await (await app(request("/api/agent-jobs", otherSession.token))).json(), []);
+    assert.equal((await app(request("/api/agent-jobs", "invalid"))).status, 401);
     assert.match(created.branch, /^journey-harness\/[0-9a-f-]{36}$/);
     assert.equal(created.defaultBranch, "main");
     assert.equal(created.repositoryFullName, "alice/project");
