@@ -5,3 +5,4 @@ dist/
 !.env.example
 coverage/
 goal-plan-*.png
+chat-composer-*.png

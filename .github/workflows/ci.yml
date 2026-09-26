@@ -36,6 +36,7 @@ jobs:
           path: |
             goal-plan-*.png
             github-sync-*.png
+            chat-composer-*.png
           if-no-files-found: ignore
   setup:
     timeout-minutes: 8
