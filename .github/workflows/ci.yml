@@ -5,6 +5,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     services:
       mongo:
         image: mongo:8.0
@@ -20,11 +21,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - run: npm test
+      - run: timeout 120s npm test
         env:
           MONGODB_TEST_URI: mongodb://127.0.0.1:27017
       - run: npm run build
   setup:
+    timeout-minutes: 8
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]

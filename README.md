@@ -12,8 +12,8 @@ Install Node.js 22.9+ and run:
 npm install
 ```
 
-This installs the project-local OpenCode CLI and creates `.env` if it does not
-exist. Existing configuration is preserved. No global OpenCode installation,
+This installs the project-local OpenCode CLI, refreshes its model catalog, and
+creates `.env` if it does not exist. Existing configuration is preserved. No global OpenCode installation,
 Bash, or curl is required.
 
 Set `MONGODB_URI` in `.env` to your MongoDB Atlas connection string. For the
@@ -36,6 +36,9 @@ OPENCODE_MODEL=opencode/space-bunny-free
 Change `OPENCODE_MODEL` in `.env` to use another provider/model. There is no
 silent model fallback. Provider authentication, when required, can be configured
 with `npm run opencode -- auth login`.
+
+If catalog refresh could not finish during installation, run
+`npm run opencode -- models opencode --refresh` before using a newly released model.
 
 ## Agent behavior
 

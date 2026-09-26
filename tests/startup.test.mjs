@@ -30,7 +30,7 @@ test("startup serves the app and stops only its owned OpenCode process", {
   timeout: 75_000,
 }, async () => {
   const database = `journey_startup_test_${crypto.randomUUID().replaceAll("-", "")}`;
-  const client = await new MongoClient(process.env.MONGODB_TEST_URI).connect();
+  const client = await new MongoClient(process.env.MONGODB_TEST_URI, { serverSelectionTimeoutMS: 5000 }).connect();
   let supervisor;
   let external;
   try {
@@ -44,7 +44,7 @@ test("startup serves the app and stops only its owned OpenCode process", {
     });
     const settings = serverSettings(env);
     const startApp = async () => {
-      supervisor = spawn(process.execPath, ["--env-file-if-exists=.env", "scripts/start.mjs"], { cwd: root, env, stdio: "ignore" });
+      supervisor = spawn(process.execPath, ["--env-file-if-exists=.env", "scripts/start.mjs"], { cwd: root, env, stdio: ["ignore", "inherit", "inherit"] });
       let startError;
       supervisor.once("error", error => { startError = error; });
       await until(async () => {
@@ -55,19 +55,23 @@ test("startup serves the app and stops only its owned OpenCode process", {
           return response.ok && (await response.json()).demo === false;
         } catch { return false; }
       }, "App did not become ready");
-      assert.match(await (await fetch(env.APP_ORIGIN)).text(), /Journey Harness/);
+      assert.match(await (await fetch(env.APP_ORIGIN, { signal: AbortSignal.timeout(2000) })).text(), /Journey Harness/);
     };
+    console.info("Startup smoke: managed service");
     await startApp();
     assert.equal(await health(settings), true);
+    console.info("Startup smoke: stopping managed service");
     await stop(supervisor);
     await until(async () => !await health(settings), "Owned OpenCode process was left running");
-    external = spawn(opencodeBinary(), ["serve", "--hostname", "127.0.0.1", "--port", settings.url.port], { cwd: root, env, stdio: "ignore" });
+    console.info("Startup smoke: external service");
+    external = spawn(opencodeBinary(), ["serve", "--hostname", "127.0.0.1", "--port", settings.url.port], { cwd: root, env, stdio: ["ignore", "inherit", "inherit"] });
     external.once("error", () => {});
     await until(() => health(settings), "External OpenCode process did not become ready");
     await startApp();
     await stop(supervisor);
     assert.equal(await health(settings), true, "Reused OpenCode process must remain running");
   } finally {
+    console.info("Startup smoke: cleanup");
     await stop(supervisor);
     await stop(external);
     await client.db(database).dropDatabase();

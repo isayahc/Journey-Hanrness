@@ -52,8 +52,8 @@ export async function health(settings, fetcher = fetch) {
 }
 
 export async function stop(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  const closed = once(child, "close").catch(() => {});
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+  const closed = once(child, "exit").catch(() => {});
   child.kill("SIGTERM");
   const timer = setTimeout(() => child.kill("SIGKILL"), 3000);
   timer.unref();
