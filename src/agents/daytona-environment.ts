@@ -31,6 +31,7 @@ export class DaytonaCommandRunner implements CommandRunner {
       command: string,
       code: number,
     ) => Promise<void> = async () => {},
+    private deadlineAt?: Date,
   ) {}
 
   async run(
@@ -39,6 +40,8 @@ export class DaytonaCommandRunner implements CommandRunner {
     options: CommandOptions,
   ): Promise<CommandResult> {
     await this.authorize();
+    const remaining = this.deadlineAt ? +this.deadlineAt - Date.now() : Infinity;
+    if (remaining <= 0) throw new Error("AGENT_DEADLINE_EXCEEDED");
     try {
       const result = await this.sandbox.process.executeCommand(
         [command, ...args].map(shellArgument).join(" "),
@@ -46,7 +49,7 @@ export class DaytonaCommandRunner implements CommandRunner {
         options.env,
         Math.min(
           900,
-          Math.max(1, Math.ceil((options.timeoutMs ?? 120_000) / 1000)),
+          Math.max(1, Math.ceil(Math.min(options.timeoutMs ?? 120_000, remaining) / 1000)),
         ),
       );
       await this.log(command, result.exitCode ?? 1);
@@ -195,6 +198,7 @@ export class DaytonaExecutionEnvironment implements ExecutionEnvironment {
         if (executionLog.length > 200) executionLog.shift();
         await jobs.updateExecution(job.jobId, job.userId, { executionLog });
       },
+      job.deadlineAt,
     );
     const path = "/tmp/journey/repository";
     const environment = async (
@@ -213,9 +217,11 @@ export class DaytonaExecutionEnvironment implements ExecutionEnvironment {
       success: boolean,
       cancelled: boolean,
     ): Promise<void> => {
+      const current = await jobs.get(job.jobId, job.userId);
+      if (job.leaseToken && (current?.leaseToken !== job.leaseToken || !current.leaseUntil || current.leaseUntil <= new Date())) return;
       try {
         if (
-          (await jobs.get(job.jobId, job.userId))?.sandbox?.state === "deleted"
+          current?.sandbox?.state === "deleted"
         )
           return;
         if (success || cancelled) {
@@ -313,7 +319,7 @@ export class DaytonaExecutionEnvironment implements ExecutionEnvironment {
         {
           OPENCODE_URL: preview.url,
           OPENCODE_SERVER_PASSWORD: password,
-          OPENCODE_MODEL: this.env.OPENCODE_MODEL,
+          OPENCODE_MODEL: job.model || this.env.OPENCODE_MODEL,
         },
         fetcher,
       );

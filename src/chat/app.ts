@@ -1,3 +1,5 @@
+import { GoalExecutor } from "../runs/executor.js";
+import { publicJob } from "../agents/job-authorizations.js";
 import { randomUUID } from "node:crypto";
 import type { AgentGitHubCredentialBroker } from "../agents/credential-broker.js";
 import type { AgentJobAuthorizationStore } from "../agents/job-authorizations.js";
@@ -110,6 +112,7 @@ export function createChatApp(
 ) {
   const busy = new Map<string, AbortController>();
   const chatJobs = new ChatJobService(store, auth ? githubApp : undefined);
+  const goalExecutor = runs ? new GoalExecutor(runs.store, auth ? githubApp : undefined) : undefined;
   const withJobs = async (chat: Conversation) => ({ ...chat, jobs: await chatJobs.states(chat) });
   const configuredOrigin = new URL(appOrigin).origin;
   const allowed = new Set([configuredOrigin]);
@@ -178,6 +181,7 @@ export function createChatApp(
           agentCredentialBrokerEnabled: Boolean(githubApp?.credentialBroker),
           agentExecutionEnabled: Boolean(githubApp?.repositoryExecutor),
           goalPlanningEnabled: Boolean(runs),
+          goalExecution: goalExecutor?.availability() || { enabled: false },
           webSearch: { provider: "tavily", configured: !!search?.enabled },
         });
       }
@@ -345,7 +349,7 @@ export function createChatApp(
         if (!auth || !githubApp?.jobStore) return json({ error: "Agent jobs are not configured." }, 503);
         const user = await sessionUser();
         if (!user) return json({ error: "Sign in with GitHub to continue." }, 401);
-        return json(await githubApp.jobStore.listForUser(user.userId));
+        return json((await githubApp.jobStore.listForUser(user.userId)).map(publicJob));
       }
 
       if (request.method === "POST" && url.pathname === "/api/agent-jobs") {
@@ -368,7 +372,7 @@ export function createChatApp(
               error: error instanceof Error ? error.message : "AGENT_EXECUTION_FAILED",
             });
           });
-          return json(job, 202);
+          return json(publicJob(job), 202);
         } catch (error) {
           const code = error instanceof Error ? error.message : "AGENT_EXECUTION_FAILED";
           if (code === "AGENT_REPOSITORY_NOT_AUTHORIZED" || code === "AGENT_POLICY_DENIED") {
@@ -388,7 +392,11 @@ export function createChatApp(
           const cancelled = jobActionMatch[2] === "cancel" ? await chatJobs.cancelPending(user.userId, jobActionMatch[1]!) : null;
           return cancelled ? json(cancelled) : json({ error: "Agent job not found." }, 404);
         }
-        if (jobActionMatch[2] === "cancel") return json(await githubApp.repositoryExecutor.cancel(job.jobId, user.userId));
+        if (jobActionMatch[2] === "cancel") {
+          const cancelled = await githubApp.repositoryExecutor.cancel(job.jobId, user.userId);
+          return json(cancelled ? publicJob(cancelled) : null);
+        }
+        if (job.run) return json({ error: "Resume this job through its goal run so saved attempt and time limits remain enforced." }, 409);
         if (["completed", "cancelled"].includes(job.status) || (job.leaseUntil && job.leaseUntil > new Date())) {
           return json({ error: "Job is finished or still leased by a worker." }, 409);
         }
@@ -414,7 +422,7 @@ export function createChatApp(
         if (!user) return json({ error: "Sign in with GitHub to continue." }, 401);
         if (!uuid.safeParse(agentJobMatch[1]).success) return json({ error: "Invalid agent job." }, 400);
         const job = await githubApp.jobStore.get(agentJobMatch[1]!, user.userId);
-        return job ? json(job) : json({ error: "Agent job not found." }, 404);
+        return job ? json(publicJob(job)) : json({ error: "Agent job not found." }, 404);
       }
 
       if (url.pathname === "/api/runs" || url.pathname.startsWith("/api/runs/")) {
@@ -430,12 +438,23 @@ export function createChatApp(
               return json(await runs.create(ownerId, input), 201);
             }
           }
-          const match = /^\/api\/runs\/([^/]+)(\/(?:plan|evidence))?$/.exec(url.pathname);
+          const match = /^\/api\/runs\/([^/]+)(\/(?:plan|evidence|execute|resume))?$/.exec(url.pathname);
           if (!match || !uuid.safeParse(match[1]).success) return json({ error: "Run not found." }, 404);
           if (request.method === "GET" && !match[2]) return json(await runs.get(ownerId, match[1]!));
           if (request.method === "GET" && match[2] === "/evidence") {
             await runs.get(ownerId, match[1]!);
             return json(await search?.evidence({ ownerId, kind: "run", resourceId: match[1]! }) || []);
+          }
+          if (request.method === "POST" && match[2] === "/execute") {
+            let input; try { input = await request.json(); } catch { return json({ error: "Send a valid repository selection." }, 400); }
+            const run = await goalExecutor!.start(ownerId, match[1]!, input);
+            void goalExecutor!.tick(ownerId, match[1]!).catch(() => {});
+            return json(run, 202);
+          }
+          if (request.method === "POST" && match[2] === "/resume") {
+            const run = await goalExecutor!.resume(ownerId, match[1]!);
+            void goalExecutor!.tick(ownerId, match[1]!).catch(() => {});
+            return json(run, 202);
           }
           if (request.method === "POST" && match[2] === "/plan") return json(await runs.plan(ownerId, match[1]!));
           return json({ error: "Not found." }, 404);
@@ -534,5 +553,5 @@ export function createChatApp(
       return json({ error: "The service is temporarily unavailable. Please try again." }, 503);
     }
   };
-  return Object.assign(handle, { recoverJobs: () => chatJobs.recover() });
+  return Object.assign(handle, { recoverJobs: async () => { await Promise.all([chatJobs.recover(), goalExecutor?.recover()]); } });
 }

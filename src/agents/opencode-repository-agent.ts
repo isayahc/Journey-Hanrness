@@ -2,7 +2,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { resolveOpenCodeModel } from "../opencode-model.js";
 
 export interface RepositoryAgent {
-  modify(workspace: string, instruction: string): Promise<void>;
+  modify(workspace: string, instruction: string, options?: { model?: string; deadlineAt?: Date }): Promise<void>;
 }
 
 export class OpenCodeRepositoryAgent implements RepositoryAgent {
@@ -22,7 +22,7 @@ export class OpenCodeRepositoryAgent implements RepositoryAgent {
     }
   }
 
-  async modify(workspace: string, instruction: string) {
+  async modify(workspace: string, instruction: string, options?: { model?: string; deadlineAt?: Date }) {
     const client = createOpencodeClient({
       baseUrl: this.baseUrl,
       directory: workspace,
@@ -30,7 +30,9 @@ export class OpenCodeRepositoryAgent implements RepositoryAgent {
       fetch: this.fetcher,
       headers: this.headers,
     });
-    const signal = AbortSignal.timeout(15 * 60 * 1000);
+    const remaining = options?.deadlineAt ? +options.deadlineAt - Date.now() : 15 * 60 * 1000;
+    if (remaining <= 0) throw new Error("AGENT_DEADLINE_EXCEEDED");
+    const signal = AbortSignal.timeout(Math.min(15 * 60 * 1000, remaining));
     const session = await client.session.create({
       title: "journey-harness repository job",
       permission: [
@@ -51,7 +53,7 @@ export class OpenCodeRepositoryAgent implements RepositoryAgent {
     if (!session.data) throw new Error("OPENCODE_SESSION_CREATE_FAILED");
     const result = await client.session.prompt({
       sessionID: session.data.id,
-      model: this.model,
+      model: options?.model ? resolveOpenCodeModel({ OPENCODE_MODEL: options.model }).model : this.model,
       system: [
         "You are the journey-harness repository modification agent.",
         "Work only inside the active repository workspace.",

@@ -1,8 +1,8 @@
 # Journey Harness
 
 An OpenCode agent workspace with persistent goals, execution plans, conversations,
-and controlled GitHub repository jobs. The next milestones add step execution,
-checkpoint recovery, memory, and measured adaptation.
+and controlled GitHub repository jobs. Saved repository plans execute with durable checkpoints and worker recovery.
+The next milestones add richer memory, criteria evaluation, and measured adaptation.
 
 ## Start
 
@@ -30,7 +30,10 @@ startup reuses it. Ctrl+C stops only the processes launched by this command.
 Choose **Goals & plans** to submit a goal, measurable success criteria, and limits.
 The goal is saved before OpenCode generates ordered steps with dependencies and
 verification requirements. Reloading or restarting the app preserves the goal and
-plan in MongoDB. Plans are proposals; step execution is a separate upcoming increment.
+plan in MongoDB. Plans are proposals until you select an enabled repository and choose **Execute plan**.
+Supported repository steps run in Daytona, recover from saved checkpoints after restart, and
+retain their model and execution limits. See [goal execution](docs/goal-execution.md) for the supported
+plan format, stacked PRs, and the boundary between execution success and criteria evaluation.
 
 If planning fails, the goal stays saved with an actionable error. Retry planning
 up to three times per run. After an interrupted request, retry becomes available
@@ -125,6 +128,6 @@ The browser suite uses its own disposable database and never the application dat
 ## Delivery plan
 
 Follow [Epic #1](https://github.com/isayahc/Journey-Hanrness/issues/1) in separate
-PRs. Goal creation and validated planning are implemented. Long-running step
-execution, restart checkpoints, evaluation loops, and learned strategies are
-subsequent increments.
+PRs. Goal creation, validated planning, checkpointed repository-step execution, and restart
+recovery are implemented. Richer memory, objective criteria evaluation/repair loops, and
+measured strategy adaptation remain subsequent increments.

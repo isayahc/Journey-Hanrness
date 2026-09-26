@@ -28,7 +28,7 @@ export class RunService {
   }
   async plan(ownerId: string, id: string) {
     const existing = await this.get(ownerId, id);
-    if (existing.status === "planned") return existing;
+    if (existing.plan) return existing;
     const run = await this.store.claim(ownerId, id, new Date());
     if (!run) {
       const current = await this.get(ownerId, id);

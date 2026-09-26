@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Collection } from "mongodb";
 import type { ScaffoldInput } from "../chat/execution.js";
 
@@ -13,6 +14,7 @@ export interface AgentJobAuthorization {
   branch?: string;
   request?: string;
   scaffold?: ScaffoldInput;
+  checkDirectory?: string;
   chat?: { id: string; requestId: string };
   executionBackend?: "daytona";
   commitSha?: string;
@@ -30,6 +32,12 @@ export interface AgentJobAuthorization {
   artifacts?: Array<{ kind: "diff" | "checks"; uri: string }>;
   executionLog?: Array<{ command: string; code: number; at: Date }>;
   leaseUntil?: Date;
+  leaseToken?: string;
+  runAttempt?: number;
+  model?: string;
+  deadlineAt?: Date;
+  run?: { id: string; stepId: string };
+  parentJobId?: string;
   status: AgentJobStatus;
   checks?: Array<{ command: string; ok: boolean }>;
   failure?: string;
@@ -49,12 +57,18 @@ export interface CreateAgentJobInput {
   branch?: string;
   request?: string;
   scaffold?: ScaffoldInput;
+  checkDirectory?: string;
   chat?: { id: string; requestId: string };
   executionBackend?: "daytona";
+  model?: string;
+  deadlineAt?: Date;
+  run?: { id: string; stepId: string };
+  parentJobId?: string;
 }
 
 type AgentJobExecutionPatch = Partial<Pick<
   AgentJobAuthorization,
+  | "runAttempt"
   | "checkpoint"
   | "sandbox"
   | "artifacts"
@@ -73,11 +87,11 @@ type AgentJobExecutionPatch = Partial<Pick<
 export interface AgentJobAuthorizationStore {
   init(): Promise<void>;
   listForUser(userId: string): Promise<AgentJobAuthorization[]>;
-  claim(jobId: string, userId: string, leaseUntil: Date): Promise<AgentJobAuthorization | null>;
+  claim(jobId: string, userId: string, leaseUntil: Date, now?: Date): Promise<AgentJobAuthorization | null>;
   create(jobId: string, userId: string, repositoryId: number, metadata?: Omit<CreateAgentJobInput, "jobId" | "userId" | "repositoryId">): Promise<AgentJobAuthorization>;
   get(jobId: string, userId: string): Promise<AgentJobAuthorization | null>;
-  setStatus(jobId: string, userId: string, status: AgentJobStatus): Promise<AgentJobAuthorization | null>;
-  updateExecution(jobId: string, userId: string, patch: AgentJobExecutionPatch): Promise<AgentJobAuthorization | null>;
+  setStatus(jobId: string, userId: string, status: AgentJobStatus, fence?: string): Promise<AgentJobAuthorization | null>;
+  updateExecution(jobId: string, userId: string, patch: AgentJobExecutionPatch, fence?: string): Promise<AgentJobAuthorization | null>;
   authorizeCredentialJob(userId: string, jobId: string, repositoryId: number): Promise<AgentJobAuthorization | null>;
 }
 
@@ -99,11 +113,11 @@ export class MongoAgentJobAuthorizationStore implements AgentJobAuthorizationSto
   }
 
   /** Atomically excludes duplicate workers; a bounded lease permits restart recovery. */
-  async claim(jobId: string, userId: string, leaseUntil: Date) {
+  async claim(jobId: string, userId: string, leaseUntil: Date, now = new Date()) {
     return this.jobs.findOneAndUpdate(
       { jobId, userId, status: { $in: ["queued", "running", "failed"] },
-        $or: [{ leaseUntil: { $exists: false } }, { leaseUntil: { $lte: new Date() } }] },
-      { $set: { status: "running", leaseUntil, updatedAt: new Date() } },
+        $or: [{ leaseUntil: { $exists: false } }, { leaseUntil: { $lte: now } }] },
+      { $set: { status: "running", leaseUntil, leaseToken: randomUUID(), updatedAt: now } },
       { returnDocument: "after", projection: { _id: 0 } },
     );
   }
@@ -127,17 +141,17 @@ export class MongoAgentJobAuthorizationStore implements AgentJobAuthorizationSto
     return this.jobs.findOne({ jobId, userId }, { projection: { _id: 0 } });
   }
 
-  async setStatus(jobId: string, userId: string, status: AgentJobStatus) {
+  async setStatus(jobId: string, userId: string, status: AgentJobStatus, fence?: string) {
     return this.jobs.findOneAndUpdate(
-      { jobId, userId },
+      { jobId, userId, ...(fence ? { leaseToken: fence, leaseUntil: { $gt: new Date() }, status: { $ne: "cancelled" as const } } : {}) },
       { $set: { status, updatedAt: new Date() } },
       { returnDocument: "after", projection: { _id: 0 } },
     );
   }
 
-  async updateExecution(jobId: string, userId: string, patch: AgentJobExecutionPatch) {
+  async updateExecution(jobId: string, userId: string, patch: AgentJobExecutionPatch, fence?: string) {
     return this.jobs.findOneAndUpdate(
-      { jobId, userId },
+      { jobId, userId, ...(fence ? { leaseToken: fence, leaseUntil: { $gt: new Date() }, status: { $ne: "cancelled" as const } } : {}) },
       { $set: { ...patch, updatedAt: new Date() } },
       { returnDocument: "after", projection: { _id: 0 } },
     );
@@ -168,11 +182,11 @@ export class MemoryAgentJobAuthorizationStore implements AgentJobAuthorizationSt
   }
 
   /** In-memory equivalent of the atomic MongoDB job claim. */
-  async claim(jobId: string, userId: string, leaseUntil: Date) {
+  async claim(jobId: string, userId: string, leaseUntil: Date, now = new Date()) {
     const job = this.jobs.get(jobId);
     if (!job || job.userId !== userId || !["queued", "running", "failed"].includes(job.status)
-      || (job.leaseUntil && job.leaseUntil > new Date())) return null;
-    const updated = { ...job, status: "running" as const, leaseUntil, updatedAt: new Date() };
+      || (job.leaseUntil && job.leaseUntil > now)) return null;
+    const updated = { ...job, status: "running" as const, leaseUntil, leaseToken: randomUUID(), updatedAt: now };
     this.jobs.set(jobId, updated);
     return structuredClone(updated);
   }
@@ -198,17 +212,17 @@ export class MemoryAgentJobAuthorizationStore implements AgentJobAuthorizationSt
     return job?.userId === userId ? structuredClone(job) : null;
   }
 
-  async setStatus(jobId: string, userId: string, status: AgentJobStatus) {
+  async setStatus(jobId: string, userId: string, status: AgentJobStatus, fence?: string) {
     const job = this.jobs.get(jobId);
-    if (!job || job.userId !== userId) return null;
+    if (!job || job.userId !== userId || fence && (job.leaseToken !== fence || !job.leaseUntil || job.leaseUntil <= new Date() || job.status === "cancelled")) return null;
     const updated = { ...job, status, updatedAt: new Date() };
     this.jobs.set(jobId, updated);
     return structuredClone(updated);
   }
 
-  async updateExecution(jobId: string, userId: string, patch: AgentJobExecutionPatch) {
+  async updateExecution(jobId: string, userId: string, patch: AgentJobExecutionPatch, fence?: string) {
     const job = this.jobs.get(jobId);
-    if (!job || job.userId !== userId) return null;
+    if (!job || job.userId !== userId || fence && (job.leaseToken !== fence || !job.leaseUntil || job.leaseUntil <= new Date() || job.status === "cancelled")) return null;
     const updated = { ...job, ...structuredClone(patch), updatedAt: new Date() };
     this.jobs.set(jobId, updated);
     return structuredClone(updated);
@@ -223,4 +237,32 @@ export class MemoryAgentJobAuthorizationStore implements AgentJobAuthorizationSt
       ? structuredClone(job)
       : null;
   }
+}
+
+export const JOB_LEASE_MS = 90_000;
+export function publicJob(job: AgentJobAuthorization) {
+  const { leaseToken: _token, ...value } = job; return value;
+}
+
+/** Every worker write uses its claim token, including sandbox lifecycle writes. */
+export function fencedJobStore(store: AgentJobAuthorizationStore, claim: AgentJobAuthorization): AgentJobAuthorizationStore {
+  if (!claim.leaseToken) throw new Error("AGENT_LEASE_LOST");
+  return new Proxy(store, { get(target, key) {
+    if (key === "updateExecution") return async (id: string, owner: string, patch: AgentJobExecutionPatch) => {
+      if (id !== claim.jobId || owner !== claim.userId) throw new Error("AGENT_LEASE_LOST");
+      const result = await target.updateExecution(id, owner, patch, claim.leaseToken);
+      if (!result) throw new Error("AGENT_LEASE_LOST"); return result;
+    };
+    if (key === "setStatus") return async (id: string, owner: string, status: AgentJobStatus) => {
+      if (id !== claim.jobId || owner !== claim.userId) throw new Error("AGENT_LEASE_LOST");
+      const result = await target.setStatus(id, owner, status, claim.leaseToken);
+      if (!result) throw new Error("AGENT_LEASE_LOST"); return result;
+    };
+    if (key === "authorizeCredentialJob") return async (owner: string, id: string, repositoryId: number) => {
+      const job = await target.authorizeCredentialJob(owner, id, repositoryId);
+      return job && job.leaseToken === claim.leaseToken && job.leaseUntil && job.leaseUntil > new Date()
+        && (!job.deadlineAt || job.deadlineAt > new Date()) ? job : null;
+    };
+    const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
+  } });
 }

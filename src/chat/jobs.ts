@@ -1,3 +1,4 @@
+import { publicJob } from "../agents/job-authorizations.js";
 import { randomUUID } from "node:crypto";
 import type { GitHubAppRuntime } from "./app.js";
 import { executionRequest, type ChatExecutionRequest, type ChatJobLink } from "./execution.js";
@@ -41,7 +42,7 @@ export class ChatJobService {
     return Promise.all(chat.messages.filter(message => message.job).map(async message => {
       const link = message.job!;
       const job = await this.github?.jobStore?.get(link.jobId, chat.ownerId);
-      return job || {
+      return job ? publicJob(job) : {
         jobId: link.jobId, repositoryId: link.repositoryId, repositoryFullName: link.repositoryFullName,
         request: link.instruction, status: link.cancelled ? "cancelled" : link.error ? "submission_failed" : "queued", failure: link.error,
       };

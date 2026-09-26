@@ -3,6 +3,8 @@ let selected = null;
 let poll;
 let saving = false;
 let enabled = false;
+let executionAvailability = { enabled: false };
+let repositories = [];
 const pending = new Set();
 
 async function api(path, body) {
@@ -41,7 +43,9 @@ function renderRun(run) {
     draft: 'Goal saved. Ready to generate a plan.',
     planning: expired ? 'Planning was interrupted. Retry to generate a fresh plan.' : 'Your goal is saved. Generating its plan…',
     planned: 'Plan saved · Ready for review',
-    blocked: 'Goal saved · Planning needs attention',
+    blocked: run.execution ? 'Execution blocked · Progress saved' : 'Goal saved · Planning needs attention',
+    running: 'Executing plan · Progress saved',
+    awaiting_evaluation: 'Execution finished · Success criteria awaiting evaluation',
   };
   $('#run-status').textContent = statuses[run.status];
   $('#run-metadata').textContent = `Model: ${run.model} · Up to ${run.limits.maxSteps} steps · ${run.limits.maxAttemptsPerStep} attempts per step · ${run.limits.maxDurationMinutes} minute execution budget · Planning attempts ${run.planningAttempts}/${run.maxPlanningAttempts}`;
@@ -49,13 +53,22 @@ function renderRun(run) {
   for (const criterion of run.successCriteria) {
     const item = document.createElement('li'); renderMarkdown(item, criterion); $('#run-criteria').append(item);
   }
-  const exhausted = run.status !== 'planned' && run.planningAttempts >= run.maxPlanningAttempts && (run.status !== 'planning' || expired);
+  const exhausted = !run.execution && run.status !== 'planned' && run.planningAttempts >= run.maxPlanningAttempts && (run.status !== 'planning' || expired);
   $('#planning-error').hidden = !run.error && !exhausted;
   $('#planning-error').textContent = [run.error?.message, exhausted ? 'Planning attempt limit reached. Create a new goal with revised criteria to try again.' : ''].filter(Boolean).join(' ');
   $('#plan-run').hidden = !run.canPlan;
   $('#plan-run').disabled = pending.has(run.id);
   $('#plan-run').textContent = run.planningAttempts ? 'Retry planning' : 'Generate plan';
   $('#plan-result').hidden = !run.plan;
+  $('#execution-note').textContent = run.execution
+    ? `Repository: ${run.execution.repositoryFullName} · Deadline: ${new Date(run.execution.deadlineAt).toLocaleString()}. Completed work and passing checks do not yet verify the goal’s success criteria.`
+    : executionAvailability.enabled ? 'Execute supported repository steps after reviewing the plan. Each change creates a reviewable PR; later changes build on the preceding commit.' : executionAvailability.reason || 'Plan saved. Execution is unavailable on this server.';
+  $('#execution-controls').hidden = !run.canStart || !executionAvailability.enabled;
+  $('#execute-run').disabled = pending.has(run.id) || !repositories.length;
+  $('#resume-run').hidden = !run.canResume;
+  $('#resume-run').disabled = pending.has(run.id);
+  $('#execution-error').hidden = !run.execution?.error;
+  $('#execution-error').textContent = run.execution?.error?.message || '';
   $('#plan-steps').replaceChildren();
   if (run.plan) {
     renderMarkdown($('#plan-summary'), run.plan.summary);
@@ -69,10 +82,25 @@ function renderRun(run) {
       const label = document.createElement('strong'); label.textContent = 'Verify: ';
       const details = document.createElement('div'); renderMarkdown(details, step.verification);
       verification.append(label, details);
-      item.append(title, instruction, dependencies, verification); $('#plan-steps').append(item);
+      item.append(title, instruction, dependencies, verification);
+      const progress = run.execution?.steps.find(entry => entry.id === step.id);
+      if (progress) {
+        const status = document.createElement('p');
+        status.textContent = `Execution: ${progress.status} · Attempts: ${progress.attempts}/${run.limits.maxAttemptsPerStep} · Checkpoint: ${progress.checkpoint?.startsWith('job:') ? 'Checks inspected' : progress.checkpoint || 'Not started'} · Criteria evaluation: pending`;
+        item.append(status);
+        if (progress.error) { const error = document.createElement('p'); error.textContent = progress.error.message; item.append(error); }
+        if (progress.output) {
+          const output = document.createElement('div'); renderMarkdown(output, progress.output.summary || ''); item.append(output);
+          for (const check of progress.output.checks) { const result = document.createElement('p'); result.textContent = `${check.ok ? 'PASS' : 'FAIL'}: ${check.command}`; item.append(result); }
+          if (/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(progress.output.pullRequestUrl || '')) {
+            const link = document.createElement('a'); link.href = progress.output.pullRequestUrl; link.textContent = 'View step pull request'; link.target = '_blank'; link.rel = 'noopener noreferrer'; item.append(link);
+          }
+        }
+      }
+      $('#plan-steps').append(item);
     }
   }
-  if (run.status === 'planning' && !expired) {
+  if (run.status === 'running' || run.status === 'planning' && !expired) {
     poll = setTimeout(() => reloadSelected().catch(showError), 5000);
   }
 }
@@ -136,6 +164,19 @@ $('#new-goal').onclick = () => {
 $('#refresh-run').onclick = () => reloadSelected().catch(showError);
 $('#plan-run').onclick = () => { if (selected?.id) generatePlan(selected.id).catch(showError); };
 
+async function executeAction(action) {
+  const id = selected?.id;
+  if (!id || pending.has(id)) return;
+  pending.add(id); $('#execute-run').disabled = true; $('#resume-run').disabled = true; $('#run-error').hidden = true;
+  try {
+    const run = await api(`/api/runs/${id}/${action}`, action === 'execute' ? { repositoryId: Number($('#run-repository').value) } : {});
+    if (selected?.id === id) renderRun(run);
+  } catch (error) { if (selected?.id === id) showError(error); }
+  finally { pending.delete(id); if (selected?.id === id) await reloadSelected().catch(showError); await refreshHistory().catch(showError); }
+}
+$('#execute-run').onclick = () => executeAction('execute');
+$('#resume-run').onclick = () => executeAction('resume');
+
 async function init() {
   try {
     const status = await api('/api/status');
@@ -145,6 +186,13 @@ async function init() {
       if (!me.ok) throw new Error('Could not load your account. Refresh to try again.');
     }
     if (!status.goalPlanningEnabled) throw new Error('Goal planning is not available on this server.');
+    executionAvailability = status.goalExecution || { enabled: false };
+    if (executionAvailability.enabled) {
+      repositories = (await api('/api/github/repositories')).filter(repository => repository.agentEnabled && !repository.archived);
+      for (const repository of repositories) {
+        const option = document.createElement('option'); option.value = String(repository.repositoryId); option.textContent = repository.fullName; $('#run-repository').append(option);
+      }
+    }
     enabled = true; $('#goals-workspace').hidden = false;
     $('#run-mode').textContent = status.demo ? 'Demo · No AI connected' : status.webSearch?.configured ? 'OpenCode · Tavily' : 'OpenCode · Search off';
     if (status.demo) $('#storage-note').textContent = 'Demo only: sample plans, no AI, and temporary history that resets when the server stops.';
