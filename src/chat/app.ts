@@ -503,13 +503,14 @@ export function createChatApp(
             } catch (error) { assistant.content = jobSubmissionError(error); }
           }
           controller.signal.throwIfAborted();
+          // A database commit cannot be aborted. Stop must stop reporting success once it begins.
+          if (busy.get(chat.id) === controller) busy.delete(chat.id);
           if (!await store.append(chat, [user, assistant], reply.opencodeSessionId, reply.opencodeSessionVersion)) {
             const latest = await store.get(ownerId, chat.id);
             if (latest?.messages.some(message => message.role === "user" && message.requestId === requestId && message.content === input.content)) return json(await withJobs(latest));
             return json({ error: "Chat changed in another tab. Reload before sending again." }, 409);
           }
-          // Stop reply only applies before this commit. The persisted job now has its own Cancel control.
-          busy.delete(chat.id);
+          // The persisted job now has its own Cancel control.
           // The startup/periodic outbox worker recovers if dispatch or the HTTP response is lost.
           void chatJobs.dispatch(chat, assistant).catch(() => {});
           return json(await withJobs((await store.get(ownerId, chat.id))!));
