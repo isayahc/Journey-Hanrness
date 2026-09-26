@@ -18,12 +18,15 @@ test('chat clears sent text, keeps navigation available, and stops only the sele
       });
     },
   };
+  let releaseCreation;
+  const creationGate = new Promise(resolve => { releaseCreation = resolve; });
   let app, base;
   const server = createServer(async (req, res) => {
     try {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const body = Buffer.concat(chunks);
+      if (req.method === 'POST' && req.url === '/api/chats') await creationGate;
       const response = await app(new Request(`${base}${req.url}`, {
         method: req.method, headers: req.headers, ...(body.length ? { body } : {}),
       }));
@@ -43,15 +46,24 @@ test('chat clears sent text, keeps navigation available, and stops only the sele
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(base);
     const composer = page.getByRole('textbox', { name: 'Message', exact: true });
-    await composer.fill('First question'); await composer.press('Enter');
+    await expect(page.locator('#composer button')).toHaveCount(1);
+    await expect(page.locator('#send')).toHaveAccessibleName('Send message');
+    await composer.fill('First question');
+    await page.locator('#send').click();
     await expect(composer).toHaveValue('');
     await expect(page.locator('#messages .message')).toHaveCount(1);
     await expect(page.getByRole('button', { name: 'New chat', exact: false })).toBeEnabled();
-    await expect(page.getByRole('button', { name: 'Stop reply' })).toBeVisible();
+    await expect(page.locator('#composer button')).toHaveCount(1);
+    await expect(page.locator('#send')).toHaveAccessibleName('Stop reply');
+    await expect(page.locator('#send')).toHaveAttribute('type', 'button');
+    await expect(page.locator('#send')).toBeDisabled();
+    releaseCreation();
+    await expect(page.locator('#send')).toBeEnabled();
     await expect.poll(() => replies.has('First question')).toBe(true);
     await page.screenshot({ path: 'chat-composer-desktop.png', fullPage: true });
     await page.getByRole('button', { name: 'New chat', exact: false }).click();
     await expect(page.locator('#thinking')).toBeHidden();
+    await expect(page.locator('#send')).toHaveAccessibleName('Send message');
     await composer.fill('Second question'); await composer.press('Enter');
     await expect.poll(() => replies.has('Second question')).toBe(true);
     replies.get('First question')();
@@ -60,6 +72,8 @@ test('chat clears sent text, keeps navigation available, and stops only the sele
     await page.getByRole('button', { name: 'Stop reply' }).click();
     await expect(composer).toBeEnabled();
     await expect(composer).toHaveValue('Second question');
+    await expect(page.locator('#send')).toHaveAccessibleName('Send message');
+    await expect(page.locator('#send')).toHaveAttribute('type', 'submit');
     await expect(page.getByRole('alert')).toContainText('Reply stopped');
     await page.getByRole('button', { name: 'First question', exact: true }).click();
     await expect(page.locator('#messages')).toContainText('Answer for First question');
@@ -73,6 +87,7 @@ test('chat clears sent text, keeps navigation available, and stops only the sele
     await expect(composer).toBeEnabled();
     assert.deepEqual(errors, []);
   } finally {
+    releaseCreation();
     for (const finish of replies.values()) finish();
     await browser?.close();
     await new Promise(resolve => server.close(resolve));

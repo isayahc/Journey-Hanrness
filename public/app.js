@@ -1,6 +1,4 @@
 const $ = selector => document.querySelector(selector);
-$('#stop').hidden = true;
-$('#stop').disabled = true;
 let current = null;
 let initializing = true;
 let loadingChat = false;
@@ -238,12 +236,14 @@ function updateControls() {
   $('#new-chat').disabled = blocked;
   $('#repositories-button').disabled = blocked;
   $('#message').disabled = blocked || loadingChat || !!pending;
-  $('#send').disabled = blocked || loadingChat || !!pending;
+  const send = $('#send');
+  send.type = pending ? 'button' : 'submit';
+  send.textContent = pending ? (pending.stopping ? 'Stopping…' : 'Stop ■') : 'Send ↑';
+  send.setAttribute('aria-label', pending ? 'Stop reply' : 'Send message');
+  send.disabled = blocked || loadingChat || (!!pending && (!pending.chatId || pending.stopping));
   $('#sync-repositories').disabled = blocked || syncingRepositories || !githubRepoSyncEnabled;
   $('#logout').disabled = initializing;
   for (const button of $('#history').children) button.disabled = blocked;
-  $('#stop').hidden = !pending;
-  $('#stop').disabled = blocked || !pending?.chatId || !!pending?.stopping;
   $('#thinking').hidden = !pending || authBlocked || repositoryMode;
   if (pending) {
     const seconds = Math.floor((Date.now() - pending.startedAt) / 1000);
@@ -361,7 +361,9 @@ $('#composer').onsubmit = async event => {
     await refreshHistory().catch(() => {});
   }
 };
-$('#stop').onclick = async () => {
+$('#send').onclick = async event => {
+  if (!pendingReplies.has(activeKey)) return;
+  event.preventDefault();
   const key = activeKey;
   const operation = pendingReplies.get(key);
   if (!operation?.chatId || operation.stopping) return;

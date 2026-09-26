@@ -16,13 +16,18 @@ class Element {
   focus() {}
   scrollIntoView() {}
 }
+const pageIds = new Set([...readFileSync(new URL('../public/index.html', import.meta.url), 'utf8').matchAll(/\bid="([^"]+)"/g)].map(match => `#${match[1]}`));
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
 async function fixture(t, persisted = {}) {
   const elements = new Map(), chats = persisted.chats || new Map(), requests = [], replies = new Map(), timers = new Set();
   const storage = persisted.storage || new Map();
   let jobGate;
-  const get = selector => { if (!elements.has(selector)) elements.set(selector, new Element()); return elements.get(selector); };
+  const get = selector => {
+    if (!pageIds.has(selector)) return null; // Match the real DOM instead of inventing removed controls.
+    if (!elements.has(selector)) elements.set(selector, new Element());
+    return elements.get(selector);
+  };
   let createGate;
   const fetch = async (path, options = {}) => {
     requests.push({ path, options });
@@ -78,22 +83,31 @@ async function fixture(t, persisted = {}) {
 
 test('sending clears the composer immediately, shows one pending bubble, and keeps navigation enabled', async t => {
   const ui = await fixture(t);
+  assert.equal(ui.get('#stop'), null, 'the composer uses one Send/Stop control');
+  assert.equal(typeof ui.get('#send').onclick, 'function');
+  assert.equal(ui.get('#send')['aria-label'], 'Send message');
+  assert.equal(ui.get('#send').type, 'submit');
   const release = await ui.delayCreation();
   const sent = ui.send('what repos do we have access to?');
   assert.equal(ui.get('#message').value, '', 'cleared before chat creation returns');
   assert.equal(ui.messages().length, 1);
   assert.equal(ui.get('#thinking').hidden, false);
-  assert.equal(ui.get('#stop').disabled, true, 'cannot stop until the chat exists');
+  assert.equal(ui.get('#send').disabled, true, 'cannot stop until the chat exists');
+  assert.equal(ui.get('#send')['aria-label'], 'Stop reply');
+  assert.equal(ui.get('#send').type, 'button');
+  await ui.get('#send').onclick({ preventDefault() {} });
+  assert.equal(ui.requests.some(request => request.path.endsWith('/cancel')), false);
   for (const id of ['#new-chat', '#repositories-button', '#logout']) assert.equal(ui.get(id).disabled, false);
   release(); await tick();
-  assert.equal(ui.get('#stop').disabled, false);
+  assert.equal(ui.get('#send').disabled, false);
   await ui.get('#composer').onsubmit({ preventDefault() {} });
   assert.equal(ui.requests.filter(request => request.path.endsWith('/messages')).length, 1, 'double submits are ignored');
   ui.replies.get('chat-1').succeed(); await sent;
   assert.equal(ui.messages().length, 2);
   assert.equal(ui.get('#message').value, '');
   assert.equal(ui.get('#thinking').hidden, true);
-  assert.equal(ui.get('#stop').hidden, true);
+  assert.equal(ui.get('#send')['aria-label'], 'Send message');
+  assert.equal(ui.get('#send').type, 'submit');
   assert.equal(ui.get('#send').disabled, false);
 });
 
@@ -143,12 +157,19 @@ test('Stop targets the visible conversation and restores its message for retry',
   ui.get('#new-chat').onclick();
   const second = ui.send('Second'); await tick();
   await ui.select('chat-1');
-  await ui.get('#stop').onclick(); await first;
+  const stopping = ui.get('#send').onclick({ preventDefault() {} });
+  assert.equal(ui.get('#send').disabled, true);
+  assert.equal(ui.get('#send').textContent, 'Stopping…');
+  await stopping; await first;
+  assert.equal(ui.get('#send')['aria-label'], 'Send message');
+  assert.equal(ui.get('#send').type, 'submit');
   assert.equal(ui.requests.filter(request => request.path.endsWith('/cancel'))[0].path, '/api/chats/chat-1/cancel');
   assert.equal(ui.get('#thinking').hidden, true);
   assert.equal(ui.get('#message').value, 'First');
   assert.match(ui.get('#error').textContent, /Reply stopped/);
   await ui.select('chat-2');
+  assert.equal(ui.get('#send')['aria-label'], 'Stop reply');
+  assert.equal(ui.get('#send').disabled, false);
   assert.equal(ui.get('#thinking').hidden, false);
   ui.replies.get('chat-2').succeed(); await second;
 });
@@ -185,7 +206,8 @@ test('job cards survive reload, keep chats usable and discard late updates after
   const ui = await fixture(t);
   const sent = ui.send('Build'); await tick();
   ui.replies.get('chat-1').succeed({ jobId: 'job-1', repositoryFullName: 'alice/app', status: 'running', leaseUntil: '2999-01-01' }); await sent;
-  assert.equal(ui.get('#stop').hidden, true);
+  assert.equal(ui.get('#send')['aria-label'], 'Send message');
+  assert.equal(ui.get('#send').type, 'submit');
   assert.equal(ui.get('#send').disabled, false);
   assert.ok(descendants(ui.get('#messages')).some(element => element.textContent === 'Cancel job'));
   const reloaded = await fixture(t, { chats: ui.chats, storage: ui.storage });
