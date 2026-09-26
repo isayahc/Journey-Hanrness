@@ -47,7 +47,7 @@ function renderRun(run) {
   $('#run-metadata').textContent = `Model: ${run.model} · Up to ${run.limits.maxSteps} steps · ${run.limits.maxAttemptsPerStep} attempts per step · ${run.limits.maxDurationMinutes} minute execution budget · Planning attempts ${run.planningAttempts}/${run.maxPlanningAttempts}`;
   $('#run-criteria').replaceChildren();
   for (const criterion of run.successCriteria) {
-    const item = document.createElement('li'); item.textContent = criterion; $('#run-criteria').append(item);
+    const item = document.createElement('li'); renderMarkdown(item, criterion); $('#run-criteria').append(item);
   }
   const exhausted = run.status !== 'planned' && run.planningAttempts >= run.maxPlanningAttempts && (run.status !== 'planning' || expired);
   $('#planning-error').hidden = !run.error && !exhausted;
@@ -58,16 +58,17 @@ function renderRun(run) {
   $('#plan-result').hidden = !run.plan;
   $('#plan-steps').replaceChildren();
   if (run.plan) {
-    $('#plan-summary').textContent = run.plan.summary;
+    renderMarkdown($('#plan-summary'), run.plan.summary);
     for (const step of run.plan.steps) {
       const item = document.createElement('li');
       const title = document.createElement('h4'); title.textContent = step.title;
-      const instruction = document.createElement('p'); instruction.textContent = step.instruction;
+      const instruction = document.createElement('div'); renderMarkdown(instruction, step.instruction);
       const dependencies = document.createElement('p'); dependencies.className = 'goal-note';
       dependencies.textContent = `${step.id} · ${step.dependsOn.length ? `After: ${step.dependsOn.join(', ')}` : 'No dependencies'}`;
-      const verification = document.createElement('p');
+      const verification = document.createElement('div');
       const label = document.createElement('strong'); label.textContent = 'Verify: ';
-      verification.append(label, document.createTextNode(step.verification));
+      const details = document.createElement('div'); renderMarkdown(details, step.verification);
+      verification.append(label, details);
       item.append(title, instruction, dependencies, verification); $('#plan-steps').append(item);
     }
   }

@@ -4,6 +4,9 @@
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Journey Harness · Goals</title>
   <link rel="stylesheet" href="/style.css">
+  <script src="/vendor/marked.js" defer></script>
+  <script src="/vendor/purify.js" defer></script>
+  <script src="/markdown.js" defer></script>
   <script src="/goals.js" defer></script>
 </head>
 <body>
@@ -49,7 +52,7 @@
         <p id="planning-error" class="run-error" role="alert" hidden></p>
         <button id="plan-run" class="goal-primary" type="button" hidden>Generate plan</button>
         <div id="plan-result" hidden>
-          <h3>Proposed execution plan</h3><p id="plan-summary"></p>
+          <h3>Proposed execution plan</h3><div id="plan-summary"></div>
           <ol id="plan-steps" class="plan-steps"></ol>
           <p class="goal-note">Plan saved. No steps have been executed.</p>
         </div>

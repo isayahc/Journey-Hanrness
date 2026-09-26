@@ -23,6 +23,9 @@ const agentAccessInput = z.object({ enabled: z.boolean() }).strict();
 const agentJobInput = z.object({ repositoryId: z.number().int().positive(), instruction: z.string().trim().min(1).max(12000) }).strict();
 const uuid = z.string().uuid();
 const assets: Record<string, [string, string]> = {
+  "/markdown.js": ["markdown.js", "text/javascript"],
+  "/vendor/marked.js": ["../node_modules/marked/lib/marked.umd.js", "text/javascript"],
+  "/vendor/purify.js": ["../node_modules/dompurify/dist/purify.min.js", "text/javascript"],
   "/": ["index.html", "text/html"], "/app.js": ["app.js", "text/javascript"], "/style.css": ["style.css", "text/css"],
   "/goals": ["goals.html", "text/html"], "/goals.js": ["goals.js", "text/javascript"],
 };

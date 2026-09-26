@@ -60,6 +60,7 @@ async function fixture(t, persisted = {}) {
   get('#agent-job-form').elements = ['#agent-repository', '#agent-instruction', '#submit-agent-job'].map(get);
   const context = vm.createContext({
     document: { querySelector: get, querySelectorAll: () => [], createElement: () => new Element(), createTextNode: text => ({ textContent: text }) },
+    renderMarkdown(element, content) { element.textContent = content; },
     fetch, URLSearchParams, AbortSignal, Date, crypto: webcrypto, window: { location: { search: '', assign() {} }, sessionStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) } },
     setInterval(fn, ms) { const id = setInterval(fn, ms); timers.add(id); return id; },
     clearInterval(id) { clearInterval(id); timers.delete(id); },

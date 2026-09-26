@@ -81,7 +81,10 @@ function renderMessage(message, pending = false) {
   article.className = `message ${message.role}${pending ? ' pending' : ''}`;
   const speaker = document.createElement('span');
   speaker.className = 'speaker'; speaker.textContent = message.role === 'user' ? 'YOU' : 'journey-harness';
-  article.append(speaker, document.createTextNode(message.content));
+  const body = document.createElement('div');
+  body.className = 'message-content';
+  renderMarkdown(body, message.content);
+  article.append(speaker, body);
   if (message.job) {
     const job = current?.jobs?.find(item => item.jobId === message.job.jobId) || {
       jobId: message.job.jobId, repositoryFullName: message.job.repositoryFullName,
@@ -461,7 +464,7 @@ function jobError(error) {
   $('#agent-job-error').textContent = error.message;
   $('#agent-job-error').hidden = false;
 }
-/** Render untrusted job output as text; only allow GitHub pull-request links. */
+/** Render job cards consistently in repository and conversation views. */
 function renderAgentJobs(jobs) {
   const list = $('#agent-job-list');
   list.replaceChildren();
@@ -486,7 +489,15 @@ function renderJobCard(job, onAction) {
   const card = document.createElement('article'); card.className = 'agent-job-card'; card.dataset.jobId = job.jobId;
   const heading = document.createElement('h4'); heading.textContent = job.repositoryFullName || `Repository ${job.repositoryId}`;
   card.append(heading);
-  for (const text of [job.request, `Status: ${job.status} · Checkpoint: ${job.checkpoint || 'Not started'}`, `Job: ${job.jobId}`, job.branch && `Branch: ${job.branch}`, job.summary && `Summary: ${job.summary}`, job.failure && `Failure: ${jobFailure(job.failure)}`]) {
+  const request = document.createElement('div');
+  renderMarkdown(request, job.request || ''); card.append(request);
+  for (const [label, content] of [['Summary', job.summary], ['Failure', job.failure && jobFailure(job.failure)]]) {
+    if (!content) continue;
+    const labelElement = document.createElement('strong'); labelElement.textContent = `${label}:`;
+    const body = document.createElement('div'); renderMarkdown(body, content);
+    card.append(labelElement, body);
+  }
+  for (const text of [ `Status: ${job.status} · Checkpoint: ${job.checkpoint || 'Not started'}`, `Job: ${job.jobId}`, job.branch && `Branch: ${job.branch}`]) {
     if (!text) continue;
     const paragraph = document.createElement('p'); paragraph.textContent = text; card.append(paragraph);
   }
