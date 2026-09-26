@@ -11,7 +11,7 @@ import { MemoryChatStore } from '../src/chat/store.ts';
 import { MemoryGitHubInstallationStore } from '../src/github/installations.ts';
 import { MemoryConnectedRepositoryStore } from '../src/github/repositories.ts';
 
-test('Sync recovers an already-installed GitHub App and returns to the repository list', { timeout: 30_000 }, async () => {
+test('Sync recovers an already-installed GitHub App and returns to the repository list', { timeout: 30_000 }, async t => {
   const auth = new MemoryAuthStore();
   const identity = await auth.bindGitHubUser({ id: 100, login: 'alice' });
   const session = await auth.createSession(identity.userId);
@@ -38,7 +38,7 @@ test('Sync recovers an already-installed GitHub App and returns to the repositor
       }));
       res.writeHead(response.status, Object.fromEntries(response.headers));
       res.end(Buffer.from(await response.arrayBuffer()));
-    } catch { res.writeHead(500); res.end(); }
+    } catch (error) { console.error('Browser fixture request failed', error); res.writeHead(500); res.end(); }
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -51,12 +51,13 @@ test('Sync recovers an already-installed GitHub App and returns to the repositor
         return [{ repositoryId: 7, fullName: 'alice/project', private: true, archived: false, defaultBranch: 'main' }];
       } },
     });
-  let browser;
+  let browser, page;
   try {
     browser = await chromium.launch();
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    context.setDefaultTimeout(5_000);
     await context.addCookies([{ name: 'journey_session', value: session.token, url: base, httpOnly: true, sameSite: 'Lax' }]);
-    const page = await context.newPage();
+    page = await context.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     let authorizations = 0;
@@ -69,15 +70,18 @@ test('Sync recovers an already-installed GitHub App and returns to the repositor
       callback.searchParams.set('code', 'test-code');
       await route.fulfill({ status: 302, headers: { location: callback.toString() }, body: '' });
     });
+    t.diagnostic('Opening the signed-in workspace');
     await page.goto(base);
     await page.getByRole('button', { name: 'Repositories', exact: true }).click();
     await page.getByText('No repositories are synced yet.', { exact: false }).waitFor();
     assert.equal(await page.locator('#connect-github').getAttribute('href'), '/github/connect');
+    t.diagnostic('Syncing without an installation link');
     await page.getByRole('button', { name: 'Sync from GitHub' }).click();
     await page.getByText('alice/project', { exact: true }).waitFor();
     assert.equal(authorizations, 1);
     assert.equal(await page.locator('#connect-github').innerText(), 'GitHub · 1 installation');
     assert.equal((await repositories.listForUser(identity.userId))[0].agentEnabled, false);
+    t.diagnostic('Syncing the recovered installation');
     await page.getByRole('button', { name: 'Sync from GitHub' }).click();
     await page.getByText('Repository access refreshed from GitHub.', { exact: true }).waitFor();
     assert.equal(authorizations, 1, 'normal sync does not repeat authorization');
@@ -88,6 +92,12 @@ test('Sync recovers an already-installed GitHub App and returns to the repositor
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await page.screenshot({ path: 'github-sync-mobile.png', fullPage: true });
     assert.deepEqual(errors, []);
+  } catch (error) {
+    if (page) {
+      t.diagnostic(`Browser stopped at ${new URL(page.url()).pathname}: ${await page.locator('body').innerText()}`);
+      await page.screenshot({ path: 'github-sync-failure.png', fullPage: true });
+    }
+    throw error;
   } finally {
     await browser?.close();
     await new Promise(resolve => server.close(resolve));
