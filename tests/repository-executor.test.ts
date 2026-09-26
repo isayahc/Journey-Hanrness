@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,6 +7,7 @@ import { AgentGitHubCredentialBroker } from "../src/agents/credential-broker.js"
 import { MemoryAgentJobAuthorizationStore } from "../src/agents/job-authorizations.js";
 import type { RepositoryAgent } from "../src/agents/opencode-repository-agent.js";
 import type { CommandOptions, CommandResult, CommandRunner } from "../src/agents/process-runner.js";
+import { workspaceEnvironment } from "../src/agents/process-runner.js";
 import { AgentRepositoryExecutor } from "../src/agents/repository-executor.js";
 import type {
   GitHubAppRepositoryClient,
@@ -79,7 +80,7 @@ class FakeRunner implements CommandRunner {
   }
 }
 
-async function fixture() {
+async function fixture(remote = false) {
   const jobs = new MemoryAgentJobAuthorizationStore();
   const repositories = new MemoryConnectedRepositoryStore();
   await repositories.syncInstallation("alice", 55, [{
@@ -97,6 +98,14 @@ async function fixture() {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "journey-executor-test-"));
   const executor = new AgentRepositoryExecutor({
     jobs, repositories, github, credentials, commands, agent, workspaceRoot,
+    environment: remote ? {
+      open: async job => ({
+        path: join(workspaceRoot, job.jobId), commands, agent,
+        environment: workspaceEnvironment,
+        readText: path => readFile(path, "utf8"),
+        close: async () => {},
+      }),
+    } : undefined,
   });
   return { jobs, repositories, github, credentials, commands, agent, workspaceRoot, executor };
 }
@@ -243,4 +252,77 @@ test("branch tampering is rejected before commit, push, or pull request", async 
   await assert.rejects(branchState.executor.execute(branchJob, "Change it"), /AGENT_BRANCH_CHANGED/);
   assert.equal(branchState.commands.calls.some(call => call.command === "git" && call.args[0] === "push"), false);
   assert.equal(branchState.github.pullRequests.length, 0);
+});
+
+test("persisted authorization wins over substituted repository metadata", async () => {
+  const state = await fixture();
+  const job = await state.executor.createJob({ userId: "alice", repositoryId: 101, instruction: "Change it" });
+  await state.executor.execute({ ...job, repositoryFullName: "attacker/other", branch: "main" }, "Change it");
+  assert.equal(state.github.pullRequests[0]?.fullName, "alice/project");
+  await assert.rejects(state.executor.execute(job, "Again"), /AGENT_JOB_NOT_AUTHORIZED/);
+});
+
+test("uncertain push does not run the agent or blindly retry a remote mutation", async () => {
+  const state = await fixture();
+  const job = await state.executor.createJob({ userId: "alice", repositoryId: 101, instruction: "Change it" });
+  await state.jobs.updateExecution(job.jobId, "alice", { checkpoint: "push_pending", commitSha: "b".repeat(40) });
+  await assert.rejects(state.executor.execute(job, "Again"), /AGENT_RECOVERY_REQUIRES_RECONCILIATION/);
+  assert.equal(state.commands.calls.length, 0);
+  assert.equal(state.agent.workspaces.length, 0);
+  assert.equal(state.github.pullRequests.length, 0);
+  assert.equal((await state.jobs.get(job.jobId, "alice"))?.checkpoint, "push_pending");
+});
+
+test("uncertain PR is reconciled from GitHub without another push, PR, or sandbox", async () => {
+  const state = await fixture();
+  const job = await state.executor.createJob({ userId: "alice", repositoryId: 101, instruction: "Change it" });
+  await state.jobs.updateExecution(job.jobId, "alice", { checkpoint: "pr_pending", commitSha: "b".repeat(40) });
+  state.github.getRepositoryBranchHead = async () => "b".repeat(40);
+  Object.assign(state.github, { findRepositoryPullRequest: async () => ({ number: 42, url: "https://github.com/alice/project/pull/42" }) });
+  const result = await state.executor.execute(job, "Again");
+  assert.equal(result?.status, "completed");
+  assert.equal(result?.pullRequestNumber, 42);
+  assert.equal(state.commands.calls.length, 0);
+  assert.equal(state.github.pullRequests.length, 0);
+});
+
+test("cancelled jobs cannot be revived and another owner cannot cancel them", async () => {
+  const state = await fixture();
+  const job = await state.executor.createJob({ userId: "alice", repositoryId: 101, instruction: "Change it" });
+  assert.equal(await state.executor.cancel(job.jobId, "mallory"), null);
+  assert.equal((await state.executor.cancel(job.jobId, "alice"))?.status, "cancelled");
+  await assert.rejects(state.executor.execute(job, "Again"), /AGENT_JOB_NOT_AUTHORIZED/);
+  assert.equal(state.commands.calls.length, 0);
+});
+
+test("a saved modified workspace resumes checks without cloning or rerunning the agent", async () => {
+  const state = await fixture(true);
+  state.commands.failCommand = "npm test";
+  const job = await state.executor.createJob({ userId: "alice", repositoryId: 101, instruction: "Change it" });
+  await assert.rejects(state.executor.execute(job, "Change it"), /AGENT_CHECK_FAILED/);
+  assert.equal((await state.jobs.get(job.jobId, "alice"))?.checkpoint, "modified");
+  assert.equal(state.agent.workspaces.length, 1);
+  state.commands.failCommand = undefined;
+  state.commands.calls = [];
+  const result = await state.executor.execute(job, "Change it");
+  assert.equal(result?.status, "completed");
+  assert.equal(state.agent.workspaces.length, 1);
+  assert.equal(state.commands.calls.some(call => call.args[0] === "clone"), false);
+  assert.equal(state.github.pullRequests.length, 1);
+});
+
+test("a verified uncertain push resumes at PR creation without repushing", async () => {
+  const state = await fixture(true);
+  state.commands.failCommand = "git push";
+  const job = await state.executor.createJob({ userId: "alice", repositoryId: 101, instruction: "Change it" });
+  await assert.rejects(state.executor.execute(job, "Change it"), /AGENT_PUSH_FAILED/);
+  assert.equal((await state.jobs.get(job.jobId, "alice"))?.checkpoint, "push_pending");
+  state.github.getRepositoryBranchHead = async () => "b".repeat(40);
+  state.commands.failCommand = undefined;
+  state.commands.calls = [];
+  const result = await state.executor.execute(job, "Change it");
+  assert.equal(result?.status, "completed");
+  assert.equal(state.commands.calls.some(call => call.args[0] === "push"), false);
+  assert.equal(state.commands.calls.some(call => call.command === "npm"), false);
+  assert.equal(state.agent.workspaces.length, 1);
 });

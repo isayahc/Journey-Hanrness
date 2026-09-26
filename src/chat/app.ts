@@ -348,6 +348,23 @@ export function createChatApp(
         }
       }
 
+      const jobActionMatch = /^\/api\/agent-jobs\/([0-9a-f-]{36})\/(resume|cancel)$/.exec(url.pathname);
+      if (request.method === "POST" && jobActionMatch) {
+        if (!auth || !githubApp?.jobStore || !githubApp.repositoryExecutor) return json({ error: "Agent jobs are not configured." }, 503);
+        const user = await sessionUser();
+        if (!user) return json({ error: "Sign in with GitHub to continue." }, 401);
+        const job = await githubApp.jobStore.get(jobActionMatch[1]!, user.userId);
+        if (!job) return json({ error: "Agent job not found." }, 404);
+        if (jobActionMatch[2] === "cancel") return json(await githubApp.repositoryExecutor.cancel(job.jobId, user.userId));
+        if (["completed", "cancelled"].includes(job.status) || (job.leaseUntil && job.leaseUntil > new Date())) {
+          return json({ error: "Job is finished or still leased by a worker." }, 409);
+        }
+        void githubApp.repositoryExecutor.execute(job, job.request || "").catch(() => {
+          // The executor persists only sanitized failure codes on the owner-scoped job.
+        });
+        return json({ jobId: job.jobId, status: "resuming" }, 202);
+      }
+
       const agentJobMatch = /^\/api\/agent-jobs\/([0-9a-f-]{36})$/.exec(url.pathname);
       if (request.method === "GET" && agentJobMatch) {
         if (!auth || !githubApp?.jobStore) return json({ error: "Agent jobs are not configured." }, 503);

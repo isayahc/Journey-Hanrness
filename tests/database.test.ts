@@ -47,3 +47,33 @@ test("MongoDB queue, persistence, deduplication, and failure flow", {
     await db.client.close();
   }
 });
+
+test("Mongo repository checkpoints and leases survive store restart and remain owner-scoped", {
+  skip: !process.env.MONGODB_TEST_URI,
+}, async () => {
+  const { MongoClient } = await import("mongodb");
+  const { MongoAgentJobAuthorizationStore } = await import("../src/agents/job-authorizations.js");
+  const client = new MongoClient(process.env.MONGODB_TEST_URI!);
+  await client.connect();
+  const database = client.db(`journey_sandbox_test_${crypto.randomUUID().replaceAll("-", "")}`);
+  try {
+    const collection = database.collection<import("../src/agents/job-authorizations.js").AgentJobAuthorization>("agent_jobs");
+    const first = new MongoAgentJobAuthorizationStore(collection);
+    await first.init();
+    await first.create("job-1", "alice", 1);
+    await first.updateExecution("job-1", "alice", { checkpoint: "modified", sandbox: {
+      id: "sandbox-1", name: "journey-job-1", state: "stopped", updatedAt: new Date(), expiresAt: new Date(Date.now() + 60000),
+    } });
+    const second = new MongoAgentJobAuthorizationStore(collection);
+    assert.equal((await second.get("job-1", "alice"))?.sandbox?.id, "sandbox-1");
+    assert.equal((await second.get("job-1", "alice"))?.checkpoint, "modified");
+    assert.equal(await second.get("job-1", "mallory"), null);
+    assert.equal(await second.updateExecution("job-1", "mallory", { checkpoint: "completed" }), null);
+    const lease = new Date(Date.now() + 60000);
+    const claims = await Promise.all([first.claim("job-1", "alice", lease), second.claim("job-1", "alice", lease)]);
+    assert.equal(claims.filter(Boolean).length, 1);
+  } finally {
+    await database.dropDatabase();
+    await client.close();
+  }
+});

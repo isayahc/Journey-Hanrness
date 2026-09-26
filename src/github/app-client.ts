@@ -65,6 +65,9 @@ export interface GitHubRepositoryHeadClient {
 }
 
 export interface GitHubPullRequestClient {
+  findRepositoryPullRequest?(
+    installationId: number, repositoryId: number, fullName: string, head: string, base: string,
+  ): Promise<GitHubPullRequestResult | null>;
   createRepositoryPullRequest(
     installationId: number,
     repositoryId: number,
@@ -184,6 +187,23 @@ export class GitHubAppClient implements GitHubAppRepositoryClient, GitHubReposit
     );
     if (!response.ok) throw new Error("GITHUB_BRANCH_HEAD_LOOKUP_FAILED");
     return gitRefResponse.parse(await response.json()).object.sha;
+  }
+
+  /** Reconcile an uncertain PR request using its unique job branch, including closed PRs. */
+  async findRepositoryPullRequest(installationId: number, repositoryId: number, fullName: string, head: string, base: string): Promise<GitHubPullRequestResult | null> {
+    validateRepositoryName(fullName);
+    validateBranch(head);
+    validateBranch(base);
+    const credential = await this.mintRepositoryCredential(installationId, repositoryId, { pull_requests: "read" });
+    const query = new URLSearchParams({ state: "all", head: `${fullName.split("/")[0]}:${head}`, base, per_page: "100" });
+    const response = await this.request(`https://api.github.com/repos/${fullName}/pulls?${query}`, {
+      headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${credential.token}`, "X-GitHub-Api-Version": "2026-03-10" },
+    });
+    if (!response.ok) throw new Error("GITHUB_PULL_REQUEST_LOOKUP_FAILED");
+    const matches = z.array(pullRequestResponse).parse(await response.json());
+    if (matches.length > 1) throw new Error("GITHUB_PULL_REQUEST_LOOKUP_FAILED");
+    const match = matches[0];
+    return match ? { number: match.number, url: match.html_url } : null;
   }
 
   async createRepositoryPullRequest(
