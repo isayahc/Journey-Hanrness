@@ -17,6 +17,7 @@ import { handleGitHubWebhook, type GitHubWebhookRuntime } from "../github/webhoo
 import { OpenCodeChatError, type ChatProvider, type ChatRepositoryContext } from "./provider.js";
 import type { ChatStore, Message, Conversation } from "./store.js";
 import { ChatJobService, jobSubmissionError } from "./jobs.js";
+import { recordActivity, type ActivityUpdate, type ChatActivity } from "./activity.js";
 import { RunRequestError, type RunService } from "../runs/service.js";
 import type { SearchService } from "../search/service.js";
 
@@ -116,11 +117,24 @@ export function createChatApp(
   const withJobs = async (chat: Conversation) => ({ ...chat, jobs: await chatJobs.states(chat) });
   const runReply = async (ownerId: string, chatId: string, requestId: string) => {
     if (busy.has(chatId)) return;
-    const chat = await store.startReply(ownerId, chatId, requestId);
-    if (!chat?.pendingReply) return;
     const controller = new AbortController();
     busy.set(chatId, controller);
+    let activity: ChatActivity[] = [];
+    let writes = Promise.resolve();
+    let acceptingActivity = true;
+    const onActivity = (update: ActivityUpdate) => {
+      if (!acceptingActivity || controller.signal.aborted) return;
+      const next = recordActivity(activity, update);
+      if (next === activity) return;
+      activity = next;
+      writes = writes.then(() => store.updateReplyActivity(ownerId, chatId, requestId, next))
+        .catch(() => { console.warn("[chat] Activity update unavailable"); });
+    };
     try {
+      const chat = await store.startReply(ownerId, chatId, requestId);
+      if (!chat?.pendingReply) return;
+      activity = chat.pendingReply.activity || [];
+      onActivity({ id: "context", label: "Preparing your request", status: "running" });
       let github: ChatRepositoryContext = { status: "not_configured", total: 0, truncated: false, repositories: [] };
       if (auth && githubApp) {
         const [installations, repositories] = await Promise.all([
@@ -137,16 +151,22 @@ export function createChatApp(
           })),
         };
       }
+      onActivity({ id: "context", label: "Request ready", status: "completed" });
       const reply = await provider.reply(chat.messages, chat.opencodeSessionId, chat.opencodeSessionVersion,
-        { ownerId, kind: "chat", resourceId: chat.id }, { signal: controller.signal, github, execution: chatJobs.availability(), jobs: await chatJobs.states(chat) });
+        { ownerId, kind: "chat", resourceId: chat.id }, { signal: controller.signal, github, execution: chatJobs.availability(), jobs: await chatJobs.states(chat), onActivity });
       controller.signal.throwIfAborted();
       const assistant: Message = { role: "assistant", content: reply.content, requestId };
       if (reply.execution) {
+        onActivity({ id: "repository", label: "Preparing repository job", status: "running" });
         try {
           assistant.job = await chatJobs.prepare(ownerId, reply.execution);
+          onActivity({ id: "repository", label: "Repository job prepared", status: "completed" });
           assistant.content = `Job requested for ${assistant.job.repositoryFullName}. Progress, checks and the pull request will appear below.`;
         } catch (error) { assistant.content = jobSubmissionError(error); }
       }
+      acceptingActivity = false;
+      await writes;
+      assistant.activity = activity;
       if (await store.completeReply(ownerId, chat.id, requestId, assistant, reply.opencodeSessionId, reply.opencodeSessionVersion)) {
         const saved = await store.get(ownerId, chat.id);
         if (saved && assistant.job) void chatJobs.dispatch(saved, assistant).catch(() => {});
@@ -157,9 +177,12 @@ export function createChatApp(
       console.error("[chat] async reply failed", { chatId, error: message });
       const userError = cancelled ? "Reply stopped." : error instanceof OpenCodeChatError || message.startsWith("OpenCode server is unreachable")
         ? message : "Reply failed. Check MongoDB, your OpenCode server, and model access, then try again.";
-      await store.failReply(ownerId, chat.id, requestId, userError, cancelled);
+      acceptingActivity = false;
+      await writes;
+      await store.failReply(ownerId, chatId, requestId, userError, cancelled);
       if (busy.get(chatId) === controller) busy.delete(chatId);
     } finally {
+      acceptingActivity = false;
       if (busy.get(chatId) === controller) busy.delete(chatId);
     }
   };

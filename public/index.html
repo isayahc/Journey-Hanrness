@@ -83,7 +83,12 @@
       </section>
       <div class="composer-wrap">
         <p id="error" role="alert" hidden></p>
-        <p id="thinking" role="status" hidden>Thinking…</p>
+        <section id="thinking" class="agent-activity" aria-label="Agent activity" hidden>
+          <div class="activity-heading"><span><span class="activity-dot" aria-hidden="true"></span>AGENT ACTIVITY</span><span id="activity-elapsed"></span></div>
+          <p id="activity-current" role="status" aria-live="polite">Starting your request…</p>
+          <ol id="activity-recent" aria-label="Recent activity"></ol>
+          <p id="activity-note"></p>
+        </section>
         <form id="composer">
           <label class="sr-only" for="message">Message</label>
           <textarea id="message" placeholder="Ask anything…" rows="2" maxlength="4000" required></textarea>
