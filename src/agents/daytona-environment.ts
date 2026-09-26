@@ -63,6 +63,7 @@ export class DaytonaCommandRunner implements CommandRunner {
 
 /** One private, time/resource bounded Daytona workspace per repository job. */
 export class DaytonaExecutionEnvironment implements ExecutionEnvironment {
+  readonly backend = "daytona" as const;
   private client: Pick<Daytona, "create" | "get" | "start" | "stop" | "delete">;
 
   constructor(
@@ -323,11 +324,12 @@ export class DaytonaExecutionEnvironment implements ExecutionEnvironment {
         agent,
         environment,
         close,
-        prepareChecks: async () => {
+        prepareChecks: async (directory = path) => {
+          if (directory !== path && !directory.startsWith(path + "/")) throw new Error("SANDBOX_PATH_DENIED");
           const lock = await commands.run(
             "test",
-            ["-f", `${path}/package-lock.json`],
-            { cwd: path },
+            ["-f", `${directory}/package-lock.json`],
+            { cwd: directory },
           );
           if (![0, 1].includes(lock.code))
             throw new Error("AGENT_CHECK_FAILED");
@@ -337,12 +339,12 @@ export class DaytonaExecutionEnvironment implements ExecutionEnvironment {
               ? ["ci", "--no-audit", "--no-fund"]
               : ["install", "--package-lock=false", "--no-audit", "--no-fund"],
             {
-              cwd: path,
-              env: await environment(path),
+              cwd: directory,
+              env: await environment(directory),
               timeoutMs: 10 * 60 * 1000,
             },
           );
-          if (dependencies.code !== 0) throw new Error("AGENT_CHECK_FAILED");
+          return { command: lock.code === 0 ? "npm ci" : "npm install --package-lock=false", ok: dependencies.code === 0 };
         },
         readText: async (file) => {
           if (!posix.normalize(file).startsWith(path + "/"))

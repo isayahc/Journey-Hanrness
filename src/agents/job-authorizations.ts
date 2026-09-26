@@ -1,4 +1,5 @@
 import type { Collection } from "mongodb";
+import type { ScaffoldInput } from "../chat/execution.js";
 
 export type AgentJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
@@ -11,11 +12,14 @@ export interface AgentJobAuthorization {
   baseSha?: string;
   branch?: string;
   request?: string;
+  scaffold?: ScaffoldInput;
+  chat?: { id: string; requestId: string };
+  executionBackend?: "daytona";
   commitSha?: string;
   summary?: string;
   pullRequestNumber?: number;
   pullRequestUrl?: string;
-  checkpoint?: "workspace" | "modified" | "committed" | "push_pending" | "pushed" | "pr_pending" | "completed";
+  checkpoint?: "workspace" | "scaffolded" | "modified" | "committed" | "push_pending" | "pushed" | "pr_pending" | "completed";
   sandbox?: {
     name: string;
     id?: string;
@@ -44,6 +48,9 @@ export interface CreateAgentJobInput {
   baseSha?: string;
   branch?: string;
   request?: string;
+  scaffold?: ScaffoldInput;
+  chat?: { id: string; requestId: string };
+  executionBackend?: "daytona";
 }
 
 type AgentJobExecutionPatch = Partial<Pick<

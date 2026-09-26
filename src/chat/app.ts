@@ -13,11 +13,12 @@ import type { GitHubInstallationStore } from "../github/installations.js";
 import type { ConnectedRepositoryStore } from "../github/repositories.js";
 import { handleGitHubWebhook, type GitHubWebhookRuntime } from "../github/webhooks.js";
 import { OpenCodeChatError, type ChatProvider, type ChatRepositoryContext } from "./provider.js";
-import type { ChatStore } from "./store.js";
+import type { ChatStore, Message, Conversation } from "./store.js";
+import { ChatJobService, jobSubmissionError } from "./jobs.js";
 import { RunRequestError, type RunService } from "../runs/service.js";
 import type { SearchService } from "../search/service.js";
 
-const messageInput = z.object({ content: z.string().trim().min(1).max(4000) }).strict();
+const messageInput = z.object({ content: z.string().trim().min(1).max(4000), requestId: z.string().uuid().optional() }).strict();
 const agentAccessInput = z.object({ enabled: z.boolean() }).strict();
 const agentJobInput = z.object({ repositoryId: z.number().int().positive(), instruction: z.string().trim().min(1).max(12000) }).strict();
 const uuid = z.string().uuid();
@@ -46,6 +47,7 @@ export interface GitHubAppRuntime {
   jobStore?: AgentJobAuthorizationStore;
   repositoryExecutor?: AgentRepositoryExecutor;
   webhook?: GitHubWebhookRuntime;
+  executionError?: string;
 }
 
 function cookies(request: Request) {
@@ -104,6 +106,8 @@ export function createChatApp(
   search?: SearchService,
 ) {
   const busy = new Map<string, AbortController>();
+  const chatJobs = new ChatJobService(store, auth ? githubApp : undefined);
+  const withJobs = async (chat: Conversation) => ({ ...chat, jobs: await chatJobs.states(chat) });
   const configuredOrigin = new URL(appOrigin).origin;
   const allowed = new Set([configuredOrigin]);
   const originUrl = new URL(configuredOrigin);
@@ -114,7 +118,7 @@ export function createChatApp(
   const secureCookies = auth?.secureCookies ?? originUrl.protocol === "https:";
   const installationCallbackUrl = new URL("/github/setup/callback", configuredOrigin).toString();
 
-  return async (request: Request): Promise<Response> => {
+  const handle = async (request: Request): Promise<Response> => {
     const headers = new Headers({
       "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
       "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: https://avatars.githubusercontent.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
@@ -377,10 +381,22 @@ export function createChatApp(
         const user = await sessionUser();
         if (!user) return json({ error: "Sign in with GitHub to continue." }, 401);
         const job = await githubApp.jobStore.get(jobActionMatch[1]!, user.userId);
-        if (!job) return json({ error: "Agent job not found." }, 404);
+        if (!job) {
+          const cancelled = jobActionMatch[2] === "cancel" ? await chatJobs.cancelPending(user.userId, jobActionMatch[1]!) : null;
+          return cancelled ? json(cancelled) : json({ error: "Agent job not found." }, 404);
+        }
         if (jobActionMatch[2] === "cancel") return json(await githubApp.repositoryExecutor.cancel(job.jobId, user.userId));
         if (["completed", "cancelled"].includes(job.status) || (job.leaseUntil && job.leaseUntil > new Date())) {
           return json({ error: "Job is finished or still leased by a worker." }, 409);
+        }
+        if (job.chat) {
+          const linked = await store.getByJob(user.userId, job.jobId);
+          if (!linked || linked.messages.find(message => message.job?.jobId === job.jobId)?.job?.cancelled) return json({ error: "Job was cancelled or its conversation is unavailable." }, 409);
+          try {
+            const authorized = await chatJobs.prepare(user.userId, { repository: job.repositoryFullName!, instruction: job.request!, scaffold: job.scaffold || null });
+            if (authorized.repositoryId !== job.repositoryId) throw new Error("AGENT_REPOSITORY_NOT_AUTHORIZED");
+          }
+          catch (error) { return json({ error: jobSubmissionError(error) }, 403); }
         }
         void githubApp.repositoryExecutor.execute(job, job.request || "").catch(() => {
           // The executor persists only sanitized failure codes on the owner-scoped job.
@@ -433,11 +449,12 @@ export function createChatApp(
           if (request.method === "GET") return json(await store.list(ownerId));
           if (request.method === "POST") return json(await store.create(ownerId), 201);
         }
-        const match = /^\/api\/chats\/([^/]+)(\/(?:messages|evidence|cancel))?$/.exec(url.pathname);
+        const match = /^\/api\/chats\/([^/]+)(\/(?:messages|evidence|cancel|jobs))?$/.exec(url.pathname);
         if (!match || !uuid.safeParse(match[1]).success) return json({ error: "Not found." }, 404);
         const chat = await store.get(ownerId, match[1]!);
         if (!chat) return json({ error: "Conversation not found." }, 404);
-        if (request.method === "GET" && !match[2]) return json(chat);
+        if (request.method === "GET" && !match[2]) return json(await withJobs(chat));
+        if (request.method === "GET" && match[2] === "/jobs") return json(await chatJobs.states(chat));
         if (request.method === "GET" && match[2] === "/evidence") return json(await search?.evidence({ ownerId, kind: "chat", resourceId: chat.id }) || []);
         if (request.method === "POST" && match[2] === "/cancel") {
           const active = busy.get(chat.id);
@@ -445,14 +462,17 @@ export function createChatApp(
           return json({ cancelled: Boolean(active) });
         }
         if (request.method !== "POST" || match[2] !== "/messages") return json({ error: "Not found." }, 404);
-        if (chat.messages.length >= 100) return json({ error: "Start a new chat to continue (50 turns per chat)." }, 400);
         let input;
         try { input = messageInput.parse(await request.json()); } catch { return json({ error: "Enter a message of 1–4,000 characters." }, 400); }
+        const requestId = input.requestId || randomUUID();
+        const previous = chat.messages.find(message => message.role === "user" && message.requestId === requestId);
+        if (previous) return previous.content === input.content ? json(await withJobs(chat)) : json({ error: "This request ID belongs to a different message." }, 409);
+        if (chat.messages.length >= 100) return json({ error: "Start a new chat to continue (50 turns per chat)." }, 400);
         if (busy.has(chat.id)) return json({ error: "A reply is already in progress." }, 409);
         const controller = new AbortController();
         busy.set(chat.id, controller);
         try {
-          const user = { role: "user" as const, content: input.content };
+          const user = { role: "user" as const, content: input.content, requestId };
           let github: ChatRepositoryContext = { status: "not_configured", total: 0, truncated: false, repositories: [] };
           if (auth && githubApp) {
             const [installations, repositories] = await Promise.all([
@@ -473,11 +493,27 @@ export function createChatApp(
           }
           controller.signal.throwIfAborted();
           const reply = await provider.reply([...chat.messages, user], chat.opencodeSessionId, chat.opencodeSessionVersion,
-            { ownerId, kind: "chat", resourceId: chat.id }, { signal: controller.signal, github });
+            { ownerId, kind: "chat", resourceId: chat.id }, { signal: controller.signal, github, execution: chatJobs.availability(), jobs: await chatJobs.states(chat) });
           controller.signal.throwIfAborted();
-          const assistant = { role: "assistant" as const, content: reply.content };
-          if (!await store.append(chat, [user, assistant], reply.opencodeSessionId, reply.opencodeSessionVersion)) return json({ error: "Chat changed in another tab. Reload before sending again." }, 409);
-          return json(await store.get(ownerId, chat.id));
+          const assistant: Message = { role: "assistant", content: reply.content, requestId };
+          if (reply.execution) {
+            try {
+              assistant.job = await chatJobs.prepare(ownerId, reply.execution);
+              assistant.content = `Job requested for ${assistant.job.repositoryFullName}. Progress, checks and the pull request will appear below.`;
+            } catch (error) { assistant.content = jobSubmissionError(error); }
+          }
+          controller.signal.throwIfAborted();
+          // A database commit cannot be aborted. Stop must stop reporting success once it begins.
+          if (busy.get(chat.id) === controller) busy.delete(chat.id);
+          if (!await store.append(chat, [user, assistant], reply.opencodeSessionId, reply.opencodeSessionVersion)) {
+            const latest = await store.get(ownerId, chat.id);
+            if (latest?.messages.some(message => message.role === "user" && message.requestId === requestId && message.content === input.content)) return json(await withJobs(latest));
+            return json({ error: "Chat changed in another tab. Reload before sending again." }, 409);
+          }
+          // The persisted job now has its own Cancel control.
+          // The startup/periodic outbox worker recovers if dispatch or the HTTP response is lost.
+          void chatJobs.dispatch(chat, assistant).catch(() => {});
+          return json(await withJobs((await store.get(ownerId, chat.id))!));
         } catch (error) {
           if (controller.signal.aborted) return json({ error: "Reply stopped.", code: "CHAT_CANCELLED" }, 409);
           const message = error instanceof Error ? error.message : String(error);
@@ -486,7 +522,7 @@ export function createChatApp(
             ? message
             : "Reply failed. Check MongoDB, your OpenCode server, and model access, then try again.";
           return json({ error: userError }, 502);
-        } finally { busy.delete(chat.id); }
+        } finally { if (busy.get(chat.id) === controller) busy.delete(chat.id); }
       }
 
       return json({ error: "Not found." }, 404);
@@ -495,4 +531,5 @@ export function createChatApp(
       return json({ error: "The service is temporarily unavailable. Please try again." }, 503);
     }
   };
+  return Object.assign(handle, { recoverJobs: () => chatJobs.recover() });
 }

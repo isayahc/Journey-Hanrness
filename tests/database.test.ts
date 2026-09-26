@@ -77,3 +77,39 @@ test("Mongo repository checkpoints and leases survive store restart and remain o
     await client.close();
   }
 });
+
+test("Mongo conversation outbox and job relationship recover across fresh stores without duplicate work", {
+  skip: !process.env.MONGODB_TEST_URI,
+}, async () => {
+  const { MongoClient } = await import('mongodb');
+  const { MongoAgentJobAuthorizationStore } = await import('../src/agents/job-authorizations.js');
+  const { ChatJobService } = await import('../src/chat/jobs.js');
+  const { chatJobsFixture, eventually } = await import('./helpers/chat-jobs.js');
+  const client = await new MongoClient(process.env.MONGODB_TEST_URI!).connect();
+  const database = client.db(`journey_chat_job_test_${crypto.randomUUID().replaceAll('-', '')}`);
+  try {
+    const collection = database.collection<Conversation>('chats');
+    const chats = new MongoChatStore(collection);
+    const jobCollection = database.collection<import('../src/agents/job-authorizations.js').AgentJobAuthorization>('jobs');
+    const jobs = new MongoAgentJobAuthorizationStore(jobCollection);
+    await chats.init(); await jobs.init();
+    const f = await chatJobsFixture(chats, jobs);
+    const service = new ChatJobService(chats, f.runtime), requestId = crypto.randomUUID();
+    const link = await service.prepare(f.alice.userId, f.state.decision!);
+    await chats.append(f.chat, [{ role: 'user', content: 'Build', requestId }, { role: 'assistant', content: 'Queued', requestId, job: link }]);
+    const reopened = new MongoChatStore(collection), freshJobs = new MongoAgentJobAuthorizationStore(jobCollection);
+    assert.equal(await reopened.getByJob('stranger', link.jobId), null);
+    assert.equal((await reopened.getByJob(f.alice.userId, link.jobId))?.id, f.chat.id);
+    const recovery = new ChatJobService(reopened, { ...f.runtime, jobStore: freshJobs });
+    await Promise.all([recovery.recover(), service.recover()]);
+    await eventually(() => freshJobs.get(link.jobId, f.alice.userId), job => job?.status === 'completed');
+    await recovery.recover();
+    assert.equal((await reopened.pendingJobs()).length, 0);
+    const chat = (await reopened.get(f.alice.userId, f.chat.id))!;
+    assert.equal(chat.messages[1]?.job?.jobId, link.jobId);
+    assert.equal((await recovery.states(chat))[0]?.status, 'completed');
+    assert.equal(await jobCollection.countDocuments(), 1); assert.equal(f.state.prs, 1);
+    await reopened.settleJob('stranger', chat.id, link.jobId, 'injected error', true);
+    assert.equal((await reopened.get(f.alice.userId, chat.id))?.messages[1]?.job?.error, undefined);
+  } finally { await database.dropDatabase(); await client.close(); }
+});
