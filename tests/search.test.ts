@@ -170,7 +170,7 @@ test("chat invokes Tavily with persisted scope and exposes owner-scoped evidence
     if (!saved.pendingReply || ["failed", "cancelled"].includes(saved.pendingReply.status)) break;
     await new Promise(resolve => setImmediate(resolve));
   }
-  assert.equal(saved.opencodeSessionVersion, 6);
+  assert.equal(saved.opencodeSessionVersion, 10);
   const permission = calls.find(call => call.path === "/session")?.body.permission;
   assert.ok(permission.some((item: any) => item.permission === "tavily_search" && item.action === "allow"));
   assert.equal(permission.some((item: any) => item.permission === "websearch" && item.action === "allow"), false);
@@ -192,7 +192,7 @@ test("legacy chat sessions migrate permissions and carry their saved transcript 
   });
   const messages = [{ role: "user" as const, content: "Remember this goal" }, { role: "assistant" as const, content: "Saved" }, { role: "user" as const, content: "Continue" }];
   const result = await provider.reply(messages, "legacy", 2);
-  assert.equal(created, 1); assert.equal(result.opencodeSessionVersion, 3);
+  assert.equal(created, 1); assert.equal(result.opencodeSessionVersion, 7);
   assert.deepEqual(JSON.parse(prompt.parts[0].text).messages, messages);
   assert.match(prompt.system, /Web search is unavailable/);
 });

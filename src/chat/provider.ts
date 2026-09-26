@@ -114,7 +114,8 @@ export class OpenCodeChatProvider implements ChatProvider {
     // Replace legacy search permissions, including when Tavily is enabled or disabled.
     const structured = !!options?.execution;
     const nativeStructured = structured && this.model.providerID !== "baseten";
-    const sessionVersion = structured ? (searchEnabled ? 6 : 5) : (searchEnabled ? 4 : 3);
+    // Start fresh after changing tool permissions and structured-output behavior.
+    const sessionVersion = structured ? (searchEnabled ? 10 : 9) : (searchEnabled ? 8 : 7);
     let sessionID = opencodeSessionVersion === sessionVersion ? opencodeSessionId : undefined;
     let created = false;
     let ticket: SearchTicket | undefined;

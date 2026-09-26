@@ -4,7 +4,7 @@ import type { ChatJobLink } from "./execution.js";
 import { MAX_CHAT_ACTIVITY, type ChatActivity } from "./activity.js";
 
 export interface Message { role: "user" | "assistant"; content: string; requestId?: string; job?: ChatJobLink; activity?: ChatActivity[] }
-export type ChatSessionVersion = 2 | 3 | 4 | 5 | 6;
+export type ChatSessionVersion = 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 export type PendingReply = { requestId: string; content: string; status: "queued" | "running" | "failed" | "cancelled"; error?: string; startedAt?: string; activity?: ChatActivity[] };
 export interface Conversation {
   id: string; ownerId: string; title: string; messages: Message[]; updatedAt: Date; version: number;
