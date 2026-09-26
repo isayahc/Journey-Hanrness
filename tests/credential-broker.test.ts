@@ -169,7 +169,7 @@ test("GitHub App client scopes installation token to one repository and minimal 
 test("Mongo agent job authorization stores no credential material", { skip: !process.env.MONGODB_TEST_URI }, async () => {
   const client = new MongoClient(process.env.MONGODB_TEST_URI!);
   await client.connect();
-  const database = client.db(`journey_harness_credential_test_${crypto.randomUUID().replaceAll("-", "")}`);
+  const database = client.db(`journey_creds_test_${crypto.randomUUID().replaceAll("-", "")}`);
   try {
     const store = new MongoAgentJobAuthorizationStore(
       database.collection<AgentJobAuthorization>("agent_jobs"),
@@ -187,7 +187,7 @@ test("Mongo agent job authorization stores no credential material", { skip: !pro
     await store.setStatus("job-1", "alice", "completed");
     assert.equal(await store.authorizeCredentialJob("alice", "job-1", 101), null);
   } finally {
-    await database.dropDatabase();
-    await client.close();
+    try { await database.dropDatabase(); }
+    finally { await client.close(); }
   }
 });
