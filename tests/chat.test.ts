@@ -230,7 +230,7 @@ test("OpenCode cancellation aborts the remote session and repository context is 
   const github = { status: 'connected' as const, total: 1, truncated: false, repositories: [
     { fullName: 'alice/project', defaultBranch: 'main', private: true, archived: false, agentEnabled: false, lastSyncedAt: '2026-09-26T17:00:00.000Z' },
   ] };
-  const reply = provider.reply([{ role: 'user', content: 'Which repositories?' }], 'existing-session', 3, undefined, { signal: controller.signal, github });
+  const reply = provider.reply([{ role: 'user', content: 'Which repositories?' }], 'existing-session', 7, undefined, { signal: controller.signal, github });
   const rejected = assert.rejects(reply, error => error instanceof DOMException && error.name === 'AbortError');
   await prompting;
   controller.abort(new DOMException('Stopped', 'AbortError'));
