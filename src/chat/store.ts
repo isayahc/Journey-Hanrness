@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { Collection } from "mongodb";
 import type { ChatJobLink } from "./execution.js";
+import { MAX_CHAT_ACTIVITY, type ChatActivity } from "./activity.js";
 
-export interface Message { role: "user" | "assistant"; content: string; requestId?: string; job?: ChatJobLink }
+export interface Message { role: "user" | "assistant"; content: string; requestId?: string; job?: ChatJobLink; activity?: ChatActivity[] }
 export type ChatSessionVersion = 2 | 3 | 4 | 5 | 6;
-export type PendingReply = { requestId: string; content: string; status: "queued" | "running" | "failed" | "cancelled"; error?: string };
+export type PendingReply = { requestId: string; content: string; status: "queued" | "running" | "failed" | "cancelled"; error?: string; startedAt?: string; activity?: ChatActivity[] };
 export interface Conversation {
   id: string; ownerId: string; title: string; messages: Message[]; updatedAt: Date; version: number;
   opencodeSessionId?: string; opencodeSessionVersion?: ChatSessionVersion;
@@ -18,6 +19,7 @@ export interface ChatStore {
   queueReply(chat: Conversation, message: Message): Promise<boolean>;
   retryReply(ownerId: string, chatId: string, requestId: string, content: string): Promise<boolean>;
   startReply(ownerId: string, chatId: string, requestId: string): Promise<Conversation | null>;
+  updateReplyActivity(ownerId: string, chatId: string, requestId: string, activity: ChatActivity[]): Promise<void>;
   completeReply(ownerId: string, chatId: string, requestId: string, message: Message, opencodeSessionId?: string, opencodeSessionVersion?: ChatSessionVersion): Promise<boolean>;
   failReply(ownerId: string, chatId: string, requestId: string, error: string, cancelled?: boolean): Promise<void>;
   pendingReplies(): Promise<Conversation[]>;
@@ -61,18 +63,22 @@ export class MongoChatStore implements ChatStore {
   async queueReply(chat: Conversation, message: Message) {
     const result = await this.collection.updateOne({ id: chat.id, ownerId: chat.ownerId, version: chat.version, $or: [{ pendingReply: { $exists: false } }, { "pendingReply.status": { $in: ["failed", "cancelled"] } }] }, {
       $push: { messages: message },
-      $set: { pendingReply: { requestId: message.requestId!, content: message.content, status: "queued" }, updatedAt: new Date(), ...(chat.messages.length ? {} : { title: message.content.slice(0, 70) }) },
+      $set: { pendingReply: { requestId: message.requestId!, content: message.content, status: "queued", startedAt: new Date().toISOString() }, updatedAt: new Date(), ...(chat.messages.length ? {} : { title: message.content.slice(0, 70) }) },
       $inc: { version: 1 },
     });
     return result.modifiedCount === 1;
   }
   async retryReply(ownerId: string, chatId: string, requestId: string, content: string) {
-    const result = await this.collection.updateOne({ id: chatId, ownerId, "pendingReply.requestId": requestId, "pendingReply.status": { $in: ["failed", "cancelled"] } }, { $set: { "pendingReply.content": content, "pendingReply.status": "queued" }, $unset: { "pendingReply.error": "" }, $currentDate: { updatedAt: true } });
+    const result = await this.collection.updateOne({ id: chatId, ownerId, "pendingReply.requestId": requestId, "pendingReply.status": { $in: ["failed", "cancelled"] } }, { $set: { "pendingReply.content": content, "pendingReply.status": "queued", "pendingReply.startedAt": new Date().toISOString(), "pendingReply.activity": [] }, $unset: { "pendingReply.error": "" }, $currentDate: { updatedAt: true } });
     return result.modifiedCount === 1;
   }
   async startReply(ownerId: string, chatId: string, requestId: string) {
     const result = await this.collection.findOneAndUpdate({ id: chatId, ownerId, "pendingReply.requestId": requestId, "pendingReply.status": { $in: ["queued", "running"] } }, { $set: { "pendingReply.status": "running" } }, { returnDocument: "after", projection: { _id: 0 } });
     return result || null;
+  }
+  async updateReplyActivity(ownerId: string, chatId: string, requestId: string, activity: ChatActivity[]) {
+    await this.collection.updateOne({ id: chatId, ownerId, "pendingReply.requestId": requestId, "pendingReply.status": "running" },
+      { $set: { "pendingReply.activity": activity.slice(-MAX_CHAT_ACTIVITY) } });
   }
   async completeReply(ownerId: string, chatId: string, requestId: string, message: Message, opencodeSessionId?: string, opencodeSessionVersion?: ChatSessionVersion) {
     const result = await this.collection.updateOne({ id: chatId, ownerId, "pendingReply.requestId": requestId, "pendingReply.status": "running" }, {
@@ -124,13 +130,13 @@ export class MemoryChatStore implements ChatStore {
     if (!current || current.ownerId !== chat.ownerId || current.version !== chat.version || (current.pendingReply && !["failed", "cancelled"].includes(current.pendingReply.status))) return false;
     current.title = current.messages.length ? current.title : message.content.slice(0, 70);
     if (!current.messages.some(item => item.requestId === message.requestId)) current.messages.push(message);
-    current.pendingReply = { requestId: message.requestId!, content: message.content, status: "queued" }; current.version++; current.updatedAt = new Date();
+    current.pendingReply = { requestId: message.requestId!, content: message.content, status: "queued", startedAt: new Date().toISOString() }; current.version++; current.updatedAt = new Date();
     return true;
   }
   async retryReply(ownerId: string, chatId: string, requestId: string, content: string) {
     const current = this.chats.get(chatId);
     if (!current || current.ownerId !== ownerId || current.pendingReply?.requestId !== requestId || !["failed", "cancelled"].includes(current.pendingReply.status)) return false;
-    current.pendingReply.content = content; current.pendingReply.status = "queued"; delete current.pendingReply.error; current.updatedAt = new Date();
+    current.pendingReply.content = content; current.pendingReply.status = "queued"; current.pendingReply.startedAt = new Date().toISOString(); current.pendingReply.activity = []; delete current.pendingReply.error; current.updatedAt = new Date();
     return true;
   }
   async startReply(ownerId: string, chatId: string, requestId: string) {
@@ -138,6 +144,12 @@ export class MemoryChatStore implements ChatStore {
     if (!current || current.ownerId !== ownerId || current.pendingReply?.requestId !== requestId || !["queued", "running"].includes(current.pendingReply.status)) return null;
     current.pendingReply.status = "running";
     return structuredClone(current);
+  }
+  async updateReplyActivity(ownerId: string, chatId: string, requestId: string, activity: ChatActivity[]) {
+    const current = this.chats.get(chatId);
+    if (current?.ownerId === ownerId && current.pendingReply?.requestId === requestId && current.pendingReply.status === "running") {
+      current.pendingReply.activity = structuredClone(activity.slice(-MAX_CHAT_ACTIVITY));
+    }
   }
   async completeReply(ownerId: string, chatId: string, requestId: string, message: Message, opencodeSessionId?: string, opencodeSessionVersion?: ChatSessionVersion) {
     const current = this.chats.get(chatId);

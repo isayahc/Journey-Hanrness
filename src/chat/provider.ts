@@ -4,6 +4,7 @@ import type { ChatSessionVersion, Message } from "./store.js";
 import { resolveOpenCodeModel } from "../opencode-model.js";
 import { SEARCH_TOOL, searchInstructions, type SearchService } from "../search/service.js";
 import type { SearchScope, SearchTicket } from "../search/store.js";
+import { activityFromEvent, type ActivityUpdate } from "./activity.js";
 
 export interface ChatReply { execution?: ChatExecutionRequest | null; content: string; opencodeSessionId?: string; opencodeSessionVersion?: ChatSessionVersion }
 export interface ChatRepositoryContext {
@@ -15,7 +16,7 @@ export interface ChatRepositoryContext {
     agentEnabled: boolean; lastSyncedAt: string;
   }>;
 }
-export interface ChatReplyOptions { signal?: AbortSignal; github?: ChatRepositoryContext; execution?: { enabled: boolean; reason?: string }; jobs?: unknown[] }
+export interface ChatReplyOptions { signal?: AbortSignal; github?: ChatRepositoryContext; execution?: { enabled: boolean; reason?: string }; jobs?: unknown[]; onActivity?: (activity: ActivityUpdate) => void }
 export interface ChatProvider { reply(messages: Message[], opencodeSessionId?: string, opencodeSessionVersion?: ChatSessionVersion, scope?: SearchScope, options?: ChatReplyOptions): Promise<ChatReply> }
 
 export { DEFAULT_OPENCODE_MODEL } from "../opencode-model.js";
@@ -102,7 +103,11 @@ export class OpenCodeChatProvider implements ChatProvider {
     let sessionID = opencodeSessionVersion === sessionVersion ? opencodeSessionId : undefined;
     let created = false;
     let ticket: SearchTicket | undefined;
+    const activityController = new AbortController();
+    const activitySignal = AbortSignal.any([signal, activityController.signal]);
+    const report = (activity: ActivityUpdate) => { if (!activitySignal.aborted) options?.onActivity?.(activity); };
     try {
+      report({ id: "connection", label: "Connecting to the agent", status: "running" });
       signal.throwIfAborted();
       if (searchEnabled) {
         const tools = await this.client.tool.ids({}, { signal });
@@ -123,6 +128,33 @@ export class OpenCodeChatProvider implements ChatProvider {
       }
       if (searchEnabled) ticket = await this.search!.start(scope!, sessionID);
       const evidence = this.search && scope ? await this.search.evidence(scope) : [];
+      report({ id: "connection", label: "Connected to the agent", status: "completed" });
+      if (options?.onActivity) {
+        // OpenCode's stream includes other sessions. Filter before retaining any metadata.
+        // A missing stream must never prevent the answer from completing.
+        let ready!: () => void;
+        const connected = new Promise<void>(resolve => { ready = resolve; });
+        const calls = new Map<string, string>();
+        void (async () => {
+          try {
+            const subscription = await this.client.event.subscribe({}, { signal: activitySignal, sseMaxRetryAttempts: 1 });
+            for await (const event of subscription.stream) {
+              ready();
+              if (activitySignal.aborted) break;
+              const activity = activityFromEvent(event, sessionID!, calls);
+              if (activity) report(activity);
+            }
+          } catch { /* Live metadata is optional; the prompt has its own error handling. */ }
+          finally {
+            ready();
+            report({ id: "activity-unavailable", label: "Live updates unavailable; waiting for the reply", status: "running" });
+          }
+        })();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([connected, new Promise<void>(resolve => { timer = setTimeout(resolve, 1000); })]);
+        clearTimeout(timer);
+      }
+      report({ id: "response", label: "Waiting for the agent’s response", status: "running" });
       console.info("[opencode] prompting chat session", { sessionID, messageCount: messages.length });
       const result = await this.client.session.prompt({
         sessionID, model: this.model,
@@ -134,6 +166,7 @@ export class OpenCodeChatProvider implements ChatProvider {
       const decision = structured ? structuredReply.parse(result.data?.info.structured) : undefined;
       const answer = decision?.content || result.data?.parts.filter(part => part.type === "text").map(part => part.text).join("\n").trim();
       if (!answer || answer.length > 16000) throw new Error("OpenCode returned an invalid reply");
+      report({ id: "response", label: "Response received", status: "completed" });
       console.info("[opencode] chat session replied", { sessionID, answerLength: answer.length });
       return { content: answer, ...(decision ? { execution: decision.execution } : {}), opencodeSessionId: sessionID, opencodeSessionVersion: sessionVersion };
     } catch (error) {
@@ -155,6 +188,7 @@ export class OpenCodeChatProvider implements ChatProvider {
       console.error("[opencode] chat request failed", { sessionID, error: details });
       throw error;
     } finally {
+      activityController.abort();
       if (signal.aborted && sessionID) {
         console.warn("[opencode] aborting stopped chat session", { sessionID });
         await this.client.session.abort({ sessionID }, { signal: AbortSignal.timeout(3000) }).catch(error => {

@@ -79,6 +79,11 @@ See [configuration](docs/configuration.md#tavily-search) for separate OpenCode s
 ## Agent behavior
 
 - Conversations and their OpenCode session IDs are saved in MongoDB.
+- While a reply runs, chat shows actual agent activity (searching, reading pages, and
+  preparing the response), elapsed time, and the latest tool outcomes. Progress survives
+  reloads and stays scoped to its conversation. Finished replies retain an expandable
+  activity history. If OpenCode's event stream is unavailable, the reply continues with
+  an explicit status; tool arguments, outputs, and private reasoning are never displayed.
 - With Tavily configured, chat can search the web and retrieve pages. Chat cannot read or modify local
   files, run shell commands, or create repository changes.
 - Repository jobs require GitHub sign-in, a connected GitHub App installation,

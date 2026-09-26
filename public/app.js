@@ -54,6 +54,7 @@ async function api(path, body, timeout = 15000) {
   if (!response.ok) {
     const error = new Error(data.error || 'Something went wrong. Please try again.');
     error.code = data.code;
+    error.status = response.status;
     throw error;
   }
   return data;
@@ -86,6 +87,7 @@ function renderMessage(message, pending = false) {
   body.className = 'message-content';
   renderMarkdown(body, message.content);
   article.append(speaker, body);
+  if (message.activity?.length) article.append(activityHistory(message.activity));
   if (message.job) {
     const job = current?.jobs?.find(item => item.jobId === message.job.jobId) || {
       jobId: message.job.jobId, repositoryFullName: message.job.repositoryFullName,
@@ -101,6 +103,7 @@ function renderMessage(message, pending = false) {
 }
 function render() {
   ++chatJobsVersion;
+  restorePendingReply();
   const retry = retryMessage(current?.id);
   if (retry && !pendingReplies.has(activeKey)) {
     if (current.messages.some(message => message.role === 'assistant' && message.requestId === retry.requestId)) saveRetry(current.id, null);
@@ -112,7 +115,8 @@ function render() {
   $('#messages').replaceChildren();
   for (const message of current?.messages || []) renderMessage(message);
   const pending = pendingReplies.get(activeKey);
-  if (pending) renderMessage({ role: 'user', content: pending.content }, true);
+  if (pending && !current?.messages.some(message => message.role === 'user' && message.requestId === pending.requestId)) renderMessage({ role: 'user', content: pending.content }, true);
+  if (!pending && current?.pendingReply?.activity?.length) $('#messages').append(activityHistory(current.pendingReply.activity));
   $('#welcome').hidden = authBlocked || repositoryMode || !!current?.messages.length || !!pending;
   $('#message').value = drafts.get(activeKey) || '';
   $('#error').hidden = !chatErrors.has(activeKey);
@@ -249,14 +253,110 @@ function updateControls() {
   $('#logout').disabled = initializing;
   for (const button of $('#history').children) button.disabled = blocked;
   $('#thinking').hidden = !pending || authBlocked || repositoryMode;
-  if (pending) {
-    const seconds = Math.floor((Date.now() - pending.startedAt) / 1000);
-    const status = pending.stopping ? 'Stopping…'
-      : seconds < 15 ? 'Thinking…' : 'Still working… You can stop this reply or open another chat.';
-    if ($('#thinking').textContent !== status) $('#thinking').textContent = status;
-  }
+  if (pending) renderActivity(pending);
   $('#messages').setAttribute('aria-busy', String(!!pending));
   updateJobControls();
+}
+function elapsedLabel(milliseconds) {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+function activityRow(item, live = false) {
+  const row = document.createElement('li');
+  row.className = `activity-item ${live ? item.status : 'past'}`;
+  const state = item.status === 'completed' ? 'Done' : item.status === 'failed' ? 'Failed' : live ? 'In progress' : 'Started';
+  const mark = document.createElement('span'); mark.className = 'activity-mark'; mark.textContent = item.status === 'completed' ? '✓' : item.status === 'failed' ? '!' : '·'; mark.setAttribute('aria-hidden', 'true');
+  const label = document.createElement('span'); label.textContent = item.label;
+  const status = document.createElement('span'); status.className = 'activity-state'; status.textContent = state;
+  row.append(mark, label, status); return row;
+}
+function activityHistory(activity) {
+  const details = document.createElement('details'); details.className = 'activity-history';
+  const summary = document.createElement('summary'); summary.textContent = `View activity (${activity.length})`;
+  const list = document.createElement('ol');
+  for (const item of activity) list.append(activityRow(item));
+  details.append(summary, list); return details;
+}
+function renderActivity(operation) {
+  const activity = operation.activity || [], latest = activity.at(-1);
+  const seconds = Date.now() - operation.startedAt;
+  const quiet = latest ? Date.now() - new Date(latest.at).getTime() : seconds;
+  const label = operation.stopping ? 'Stopping the reply…' : operation.updateError ? 'Reconnecting to progress updates…'
+    : latest?.status === 'running' ? latest.label : latest?.status === 'failed' ? 'The last action failed; waiting for the agent…'
+      : latest ? 'Working on your reply…' : operation.chatId ? 'Waiting for the agent…' : 'Starting your request…';
+  if ($('#activity-current').textContent !== label) $('#activity-current').textContent = label;
+  $('#activity-elapsed').textContent = elapsedLabel(seconds);
+  const signature = JSON.stringify(activity);
+  if ($('#activity-recent').dataset.signature !== signature) {
+    $('#activity-recent').dataset.signature = signature;
+    $('#activity-recent').replaceChildren(...activity.slice(-3).map(item => activityRow(item, true)));
+  }
+  $('#activity-note').textContent = operation.updateError ? 'The reply may still be running. Retrying progress updates; you can still use Stop.'
+    : activity.some(item => item.id === 'activity-unavailable') ? 'Live tool updates are unavailable. Waiting for the reply; you can stop or open another chat.'
+    : quiet >= 15000 ? `No new activity for ${elapsedLabel(quiet)}. You can stop this reply or open another chat.`
+    : 'Updates appear as the agent works. You can open another chat.';
+}
+function receiveProgress(key, operation, result) {
+  const progress = result.pendingReply;
+  if (progress?.requestId === operation.requestId) {
+    operation.activity = progress.activity || [];
+    if (progress.startedAt) operation.startedAt = new Date(progress.startedAt).getTime();
+  }
+  if (activeKey !== key) return;
+  const changed = JSON.stringify(current?.messages) !== JSON.stringify(result.messages);
+  current = result;
+  if (changed) render(); else updateControls();
+}
+async function pollReply(key, operation, result) {
+  let failures = 0;
+  while (['queued', 'running'].includes(result.pendingReply?.status) && result.pendingReply.requestId === operation.requestId) {
+    receiveProgress(key, operation, result);
+    await new Promise(resolve => setTimeout(resolve, CHAT_POLL_INTERVAL_MS));
+    try {
+      result = await api(`/api/chats/${operation.chatId}`, undefined, 15000);
+      operation.updateError = false; failures = 0;
+    } catch (error) {
+      if ([401, 403, 404].includes(error.status)) throw error;
+      failures++;
+      operation.updateError = true;
+      if (activeKey === key) updateControls();
+      await new Promise(resolve => setTimeout(resolve, Math.min(failures, 5) * 1000));
+    }
+  }
+  receiveProgress(key, operation, result);
+  if (result.pendingReply?.requestId === operation.requestId && ['failed', 'cancelled'].includes(result.pendingReply.status)) {
+    const error = new Error(result.pendingReply.error || 'Reply failed.');
+    error.code = result.pendingReply.status === 'cancelled' ? 'CHAT_CANCELLED' : undefined;
+    throw error;
+  }
+  return result;
+}
+function restorePendingReply() {
+  const progress = current?.pendingReply;
+  if (!['queued', 'running'].includes(progress?.status) || pendingReplies.has(current.id)) return;
+  const key = current.id;
+  const operation = { ...progress, chatId: key, startedAt: progress.startedAt ? new Date(progress.startedAt).getTime() : Date.now(), stopping: false };
+  pendingReplies.set(key, operation); drafts.delete(key); chatErrors.delete(key);
+  saveRetry(key, { requestId: operation.requestId, content: operation.content });
+  // Start after render has finished so navigation/reload follows the saved request without resubmitting it.
+  const snapshot = current;
+  void Promise.resolve().then(async () => {
+    const timer = setInterval(updateControls, 1000);
+    try {
+      const result = await pollReply(key, operation, snapshot);
+      saveRetry(key, null);
+      if (activeKey === key) current = result;
+    } catch (error) {
+      if (error.code === 'CHAT_CANCELLED') saveRetry(key, null);
+      drafts.set(key, operation.content);
+      chatErrors.set(key, error.code === 'CHAT_CANCELLED' ? 'Reply stopped. Your message is ready to send again.' : error.message);
+    } finally {
+      clearInterval(timer); pendingReplies.delete(key);
+      // A failed status request does not mean the server stopped. Keep the last known activity visible.
+      if (activeKey === key) { updateControls(); if (!['queued', 'running'].includes(current?.pendingReply?.status)) render(); }
+      await refreshHistory().catch(() => {});
+    }
+  });
 }
 $('#message').oninput = () => drafts.set(activeKey, $('#message').value);
 $('#new-chat').onclick = () => {
@@ -337,15 +437,7 @@ $('#composer').onsubmit = async event => {
     }
     saveRetry(chat.id, { requestId: operation.requestId, content });
     let result = await api(`/api/chats/${chat.id}/messages`, { content, requestId: operation.requestId }, 15000);
-    while (result.pendingReply?.status === 'queued' || result.pendingReply?.status === 'running') {
-      await new Promise(resolve => setTimeout(resolve, CHAT_POLL_INTERVAL_MS));
-      result = await api(`/api/chats/${chat.id}`, undefined, 15000);
-    }
-    if (result.pendingReply?.status === 'failed' || result.pendingReply?.status === 'cancelled') {
-      const error = new Error(result.pendingReply.error || (result.pendingReply.status === 'cancelled' ? 'Reply stopped.' : 'Reply failed.'));
-      error.code = result.pendingReply.status === 'cancelled' ? 'CHAT_CANCELLED' : undefined;
-      throw error;
-    }
+    result = await pollReply(key, operation, result);
     saveRetry(chat.id, null);
     if (activeKey === key) current = result;
   } catch (error) {
