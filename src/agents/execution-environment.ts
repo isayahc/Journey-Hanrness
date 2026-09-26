@@ -19,12 +19,13 @@ export interface ExecutionWorkspace {
     extra?: Record<string, string>,
   ): Promise<Record<string, string>>;
   readText(path: string): Promise<string>;
-  prepareChecks?(): Promise<void>;
+  prepareChecks?(directory?: string): Promise<{ command: string; ok: boolean } | void>;
   close(success: boolean, cancelled: boolean): Promise<void>;
 }
 
 /** Allocates or reconnects only the workspace belonging to this authorized job. */
 export interface ExecutionEnvironment {
+  readonly backend?: "daytona";
   open(
     job: AgentJobAuthorization,
     jobs: AgentJobAuthorizationStore,

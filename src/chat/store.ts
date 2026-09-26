@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { Collection } from "mongodb";
+import type { ChatJobLink } from "./execution.js";
 
-export interface Message { role: "user" | "assistant"; content: string }
-export type ChatSessionVersion = 2 | 3 | 4;
+export interface Message { role: "user" | "assistant"; content: string; requestId?: string; job?: ChatJobLink }
+export type ChatSessionVersion = 2 | 3 | 4 | 5 | 6;
 export interface Conversation {
   id: string; ownerId: string; title: string; messages: Message[]; updatedAt: Date; version: number;
   opencodeSessionId?: string; opencodeSessionVersion?: ChatSessionVersion;
@@ -12,6 +13,9 @@ export interface ChatStore {
   get(ownerId: string, id: string): Promise<Conversation | null>;
   create(ownerId: string): Promise<Conversation>;
   append(chat: Conversation, messages: Message[], opencodeSessionId?: string, opencodeSessionVersion?: ChatSessionVersion): Promise<boolean>;
+  pendingJobs(): Promise<Conversation[]>;
+  getByJob(ownerId: string, jobId: string): Promise<Conversation | null>;
+  settleJob(ownerId: string, chatId: string, jobId: string, error?: string, cancelled?: boolean): Promise<void>;
 }
 const newChat = (ownerId: string): Conversation => ({
   id: randomUUID(), ownerId, title: "New conversation", messages: [], updatedAt: new Date(), version: 0,
@@ -21,6 +25,7 @@ export class MongoChatStore implements ChatStore {
   async init() {
     await this.collection.createIndex({ id: 1 }, { unique: true });
     await this.collection.createIndex({ ownerId: 1, updatedAt: -1 });
+    await this.collection.createIndex({ "messages.job.pending": 1 });
   }
   async list(ownerId: string) {
     return this.collection.find({ ownerId }, { projection: { _id: 0, id: 1, title: 1, updatedAt: 1 } })
@@ -45,6 +50,17 @@ export class MongoChatStore implements ChatStore {
     });
     return result.modifiedCount === 1;
   }
+  pendingJobs() {
+    return this.collection.find({ "messages.job.pending": true }, { projection: { _id: 0 } }).limit(50).toArray();
+  }
+  getByJob(ownerId: string, jobId: string) {
+    return this.collection.findOne({ ownerId, "messages.job.jobId": jobId }, { projection: { _id: 0 } });
+  }
+  async settleJob(ownerId: string, chatId: string, jobId: string, error?: string, cancelled = false) {
+    await this.collection.updateOne({ id: chatId, ownerId, "messages.job.jobId": jobId }, {
+      $set: { "messages.$.job.pending": false, ...(error ? { "messages.$.job.error": error } : {}), ...(cancelled ? { "messages.$.job.cancelled": true } : {}) },
+    });
+  }
 }
 export class MemoryChatStore implements ChatStore {
   private chats = new Map<string, Conversation>();
@@ -68,5 +84,17 @@ export class MemoryChatStore implements ChatStore {
     if (opencodeSessionVersion) current.opencodeSessionVersion = opencodeSessionVersion;
     current.messages.push(...messages); current.version++; current.updatedAt = new Date();
     return true;
+  }
+  async pendingJobs() {
+    return structuredClone([...this.chats.values()].filter(chat => chat.messages.some(message => message.job?.pending)).slice(0, 50));
+  }
+  async getByJob(ownerId: string, jobId: string) {
+    return structuredClone([...this.chats.values()].find(chat => chat.ownerId === ownerId && chat.messages.some(message => message.job?.jobId === jobId)) || null);
+  }
+  async settleJob(ownerId: string, chatId: string, jobId: string, error?: string, cancelled = false) {
+    const chat = this.chats.get(chatId);
+    if (chat?.ownerId !== ownerId) return;
+    const link = chat.messages.find(message => message.job?.jobId === jobId)?.job;
+    if (link) { link.pending = false; if (error) link.error = error; if (cancelled) link.cancelled = true; }
   }
 }
