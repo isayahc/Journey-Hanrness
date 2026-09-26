@@ -61,6 +61,10 @@ through the owner-scoped `GET /api/chats/:id/evidence` and
 exhausted budgets stop the tool before a provider call. Key/quota/timeout failures
 are recorded with sanitized messages and do not erase the conversation or goal.
 
+OpenRouter is opt-in. Set `OPENROUTER_API_KEY` in `.env`, then choose an
+OpenRouter model explicitly, for example `OPENCODE_MODEL=openrouter/anthropic/claude-sonnet-4`.
+Leaving `OPENCODE_MODEL` unset continues to use `opencode/space-bunny-free`.
+
 ## GitHub sign-in
 
 Set `APP_ORIGIN`, `GITHUB_APP_CLIENT_ID`, and `GITHUB_APP_CLIENT_SECRET`.

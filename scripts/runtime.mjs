@@ -19,9 +19,19 @@ export function runtimeEnvironment(env = process.env) {
   const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT || "{}");
   const model = env.OPENCODE_MODEL?.trim() || "opencode/space-bunny-free";
   if (!/^[^/\s]+\/\S+$/.test(model)) throw new Error("OPENCODE_MODEL must be provider/model");
+  const provider = env.OPENROUTER_API_KEY ? {
+    ...(config.provider || {}),
+    openrouter: {
+      ...(config.provider?.openrouter || {}),
+      options: {
+        ...(config.provider?.openrouter?.options || {}),
+        apiKey: "{env:OPENROUTER_API_KEY}",
+      },
+    },
+  } : config.provider;
   return {
     ...env, OPENCODE_MODEL: model, OPENCODE_ENABLE_EXA: "1",
-    OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...config, model }),
+    OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...config, ...(provider ? { provider } : {}), model }),
   };
 }
 
