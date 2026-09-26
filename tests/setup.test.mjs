@@ -29,6 +29,9 @@ test("runtime defaults, explicit overrides, and health authentication stay consi
   assert.equal(runtimeEnvironment({ OPENCODE_MODEL: "  " }).OPENCODE_MODEL, "opencode/space-bunny-free");
   const env = runtimeEnvironment({ OPENCODE_MODEL: "custom/model", OPENCODE_CONFIG_CONTENT: '{"share":"disabled"}' });
   assert.deepEqual(JSON.parse(env.OPENCODE_CONFIG_CONTENT), { share: "disabled", model: "custom/model" });
+  const openRouter = runtimeEnvironment({ OPENROUTER_API_KEY: "test-only" });
+  assert.equal(JSON.parse(openRouter.OPENCODE_CONFIG_CONTENT).provider.openrouter.options.apiKey, "{env:OPENROUTER_API_KEY}");
+  assert.equal(openRouter.OPENCODE_MODEL, "opencode/space-bunny-free");
   assert.throws(() => runtimeEnvironment({ OPENCODE_MODEL: "invalid" }), /provider\/model/);
   const settings = serverSettings({ OPENCODE_URL: "http://127.0.0.1:4500", OPENCODE_SERVER_PASSWORD: "test-only", OPENCODE_SERVER_USERNAME: "operator" });
   assert.equal(await health(settings, async (url, options) => {
