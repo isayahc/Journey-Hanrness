@@ -1,4 +1,4 @@
-/** Render assistant Markdown into a container without allowing executable HTML.
+/** Render message Markdown into a container without allowing executable HTML.
  * @param {HTMLElement} container Message body to replace.
  * @param {string} content Original message text, retained unchanged in storage.
  * @returns {void}

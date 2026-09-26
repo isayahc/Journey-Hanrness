@@ -46,7 +46,7 @@ test('assistant Markdown renders safely and persists across reloads on mobile', 
     await expect(markdown.getByRole('link', { name: 'source' })).toHaveAttribute('rel', 'noopener noreferrer');
     assert.equal(await markdown.locator('script, img, iframe, [onerror], a[href^="javascript:"]').count(), 0);
     assert.equal(await page.evaluate(() => window.pwned), undefined);
-    await expect(page.locator('.message.user .message-content')).toHaveText('**literal input**');
+    await expect(page.locator('.message.user .markdown strong')).toHaveText('literal input');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     await page.reload();
     await page.getByRole('button', { name: '**literal input**', exact: true }).click();

@@ -61,8 +61,7 @@ function renderMessage(message, pending = false) {
   speaker.className = 'speaker'; speaker.textContent = message.role === 'user' ? 'YOU' : 'journey-harness';
   const body = document.createElement('div');
   body.className = 'message-content';
-  if (message.role === 'assistant') renderMarkdown(body, message.content);
-  else body.textContent = message.content;
+  renderMarkdown(body, message.content);
   article.append(speaker, body);
   $('#messages').append(article);
 }
@@ -412,7 +411,7 @@ function jobError(error) {
   $('#agent-job-error').textContent = error.message;
   $('#agent-job-error').hidden = false;
 }
-/** Render untrusted job output as text; only allow GitHub pull-request links. */
+/** Render job prose as sanitized Markdown and keep operational metadata literal. */
 function renderAgentJobs(jobs) {
   const list = $('#agent-job-list');
   list.replaceChildren();
@@ -421,7 +420,15 @@ function renderAgentJobs(jobs) {
     const card = document.createElement('article'); card.className = 'agent-job-card';
     const heading = document.createElement('h4'); heading.textContent = job.repositoryFullName || `Repository ${job.repositoryId}`;
     card.append(heading);
-    for (const text of [job.request, `Status: ${job.status} · Checkpoint: ${job.checkpoint || 'Not started'}`, `Job: ${job.jobId}`, job.branch && `Branch: ${job.branch}`, job.summary && `Summary: ${job.summary}`, job.failure && `Failure: ${job.failure}`]) {
+    const request = document.createElement('div');
+    renderMarkdown(request, job.request || ''); card.append(request);
+    for (const [label, content] of [['Summary', job.summary], ['Failure', job.failure]]) {
+      if (!content) continue;
+      const heading = document.createElement('strong'); heading.textContent = `${label}:`;
+      const body = document.createElement('div'); renderMarkdown(body, content);
+      card.append(heading, body);
+    }
+    for (const text of [ `Status: ${job.status} · Checkpoint: ${job.checkpoint || 'Not started'}`, `Job: ${job.jobId}`, job.branch && `Branch: ${job.branch}`]) {
       if (!text) continue;
       const paragraph = document.createElement('p'); paragraph.textContent = text; card.append(paragraph);
     }

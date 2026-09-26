@@ -48,7 +48,7 @@ test('repository jobs submit, survive reload, show results, resume, cancel, and 
     assert.deepEqual(calls, [{ repositoryId: 1, instruction: 'Add tests <script>bad()</script>' }]);
     await expect(page.getByRole('button', { name: 'Resume job' })).toHaveCount(0);
     await open();
-    await expect(page.locator('#agent-job-list')).toContainText('Add tests <script>bad()</script>');
+    await expect(page.locator('#agent-job-list')).toContainText('Add tests');
     jobs[0] = { ...jobs[0], status: 'failed', leaseUntil: null, checkpoint: 'modified', failure: 'CHECKS_FAILED', summary: 'Updated tests', checks: [{ command: 'npm test', ok: false }] };
     await page.getByRole('button', { name: 'Refresh jobs' }).click();
     await expect(page.locator('#agent-job-list')).toContainText('FAIL: npm test');
