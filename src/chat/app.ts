@@ -36,6 +36,7 @@ const SESSION_COOKIE = "journey_session";
 const OAUTH_STATE_COOKIE = "journey_oauth_state";
 const INSTALL_STATE_COOKIE = "journey_install_state";
 const OWNER_COOKIE = "journey_owner";
+const executionIntent = (content: string) => /\b(build|create|implement|change|modify|fix|add|remove|update|refactor|scaffold|open (a )?pull request|try again|retry|resume|current|latest|today|news|research|official|source|sources|search|lookup)\b/i.test(content);
 
 export interface AuthRuntime {
   store: AuthStore;
@@ -152,8 +153,9 @@ export function createChatApp(
         };
       }
       onActivity({ id: "context", label: "Request ready", status: "completed" });
+      const wantsExecution = executionIntent(chat.pendingReply.content);
       const reply = await provider.reply(chat.messages, chat.opencodeSessionId, chat.opencodeSessionVersion,
-        { ownerId, kind: "chat", resourceId: chat.id }, { signal: controller.signal, github, execution: chatJobs.availability(), jobs: await chatJobs.states(chat), onActivity });
+        { ownerId, kind: "chat", resourceId: chat.id }, { signal: controller.signal, github, onActivity, ...(wantsExecution ? { execution: chatJobs.availability(), jobs: await chatJobs.states(chat) } : {}) });
       controller.signal.throwIfAborted();
       const assistant: Message = { role: "assistant", content: reply.content, requestId };
       if (reply.execution) {

@@ -179,7 +179,8 @@ export class OpenCodeChatProvider implements ChatProvider {
       if (result.data?.info.error) throw result.data.info.error;
        const answerText = result.data?.parts.filter(part => part.type === "text").map(part => part.text).join("\n").trim() || "";
        const decision = structured ? structuredReply.parse(result.data?.info.structured || parseStructuredText(answerText)) : undefined;
-       const answer = decision?.content || answerText;
+       const structuredData = result.data?.info.structured as { content?: string } | undefined;
+       const answer = decision?.content || answerText || structuredData?.content;
       if (!answer || answer.length > 16000) throw new Error("OpenCode returned an invalid reply");
       report({ id: "response", label: "Response received", status: "completed" });
       console.info("[opencode] chat session replied", { sessionID, answerLength: answer.length });
