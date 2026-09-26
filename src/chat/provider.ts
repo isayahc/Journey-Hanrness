@@ -93,7 +93,7 @@ export class OpenCodeChatProvider implements ChatProvider {
     });
   }
   async reply(messages: Message[], opencodeSessionId?: string, opencodeSessionVersion?: ChatSessionVersion, scope?: SearchScope, options?: ChatReplyOptions): Promise<ChatReply> {
-    const timeout = AbortSignal.timeout(90_000);
+    const timeout = AbortSignal.timeout(5 * 60 * 1000);
     const signal = options?.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
     const searchEnabled = !!this.search?.enabled && !!scope;
     // Replace legacy search permissions, including when Tavily is enabled or disabled.

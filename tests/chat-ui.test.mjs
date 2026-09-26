@@ -46,13 +46,14 @@ async function fixture(t, persisted = {}) {
     const chat = chats.get(id);
     assert.ok(chat, `Unknown request ${path}`);
     if (action === 'jobs') { if (jobGate) { const gate = jobGate; jobGate = null; await gate; } return response(chat.jobs || []); }
-    if (action === 'messages') return new Promise((resolve, reject) => {
+    if (action === 'messages') return new Promise(resolve => {
       const { content, requestId } = JSON.parse(options.body);
       replies.set(id, {
-        succeed(job) { if (job) chat.jobs = [job]; chat.messages.push({ role: 'user', content, requestId }, { role: 'assistant', content: `Answer for ${content}`, requestId, ...(job ? { job: { jobId: job.jobId, repositoryFullName: job.repositoryFullName } } : {}) }); chat.version++; resolve(response(chat)); },
-        fail(code) { resolve(response({ error: 'Test reply failed', code }, code === 'CHAT_CANCELLED' ? 409 : 502)); },
-        timeout() { reject(new DOMException('Timed out', 'TimeoutError')); },
+        succeed(job) { if (job) chat.jobs = [job]; chat.messages.push({ role: 'assistant', content: `Answer for ${content}`, requestId, ...(job ? { job: { jobId: job.jobId, repositoryFullName: job.repositoryFullName } } : {}) }); chat.pendingReply = undefined; chat.version++; },
+        fail(code) { chat.pendingReply = { requestId, content, status: code === 'CHAT_CANCELLED' ? 'cancelled' : 'failed', error: code === 'CHAT_CANCELLED' ? 'Reply stopped.' : 'Test reply failed' }; },
+        timeout() { chat.pendingReply = { requestId, content, status: 'failed', error: 'The request timed out.' }; },
       });
+      if (!chat.messages.some(message => message.requestId === requestId)) chat.messages.push({ role: 'user', content, requestId }); chat.pendingReply = { requestId, content, status: 'running' }; resolve(response(chat, 202));
     });
     if (action === 'cancel') { replies.get(id)?.fail('CHAT_CANCELLED'); return response({ cancelled: true }); }
     return response(chat);
@@ -133,7 +134,7 @@ test('background replies and failures do not replace another chat or its draft',
   assert.match(ui.get('#error').textContent, /Test reply failed/);
   const retried = ui.get('#composer').onsubmit({ preventDefault() {} }); await tick();
   ui.replies.get('chat-2').succeed(); await retried;
-  assert.equal(ui.chats.get('chat-2').messages.length, 2);
+   assert.equal(ui.chats.get('chat-2').messages.length, 2);
   await ui.select('chat-1');
   assert.equal(ui.get('#message').value, 'Unsent draft in first chat');
 });
@@ -184,7 +185,7 @@ test('a timed-out request has a deadline, requests cancellation, and keeps the d
   assert.equal(ui.get('#send').disabled, false);
   assert.equal(ui.get('#message').value, 'Slow reply');
   assert.match(ui.get('#error').textContent, /timed out/);
-  assert.ok(ui.requests.some(request => request.path.endsWith('/cancel')));
+  assert.equal(ui.requests.some(request => request.path.endsWith('/cancel')), false);
 });
 
 

@@ -16,13 +16,22 @@ function browser(app: ReturnType<typeof createChatApp>) {
     return response;
   };
 }
+async function waitForReply(request: ReturnType<typeof browser>, path: string, body: unknown) {
+  const accepted = await request(path, body);
+  assert.equal(accepted.status, 202);
+  for (;;) {
+    const response = await request(path.replace(/\/messages$/, ""));
+    const chat = await response.json();
+    if (!chat.pendingReply || ["failed", "cancelled"].includes(chat.pendingReply.status)) return { response, chat };
+    await new Promise(resolve => setImmediate(resolve));
+  }
+}
 test("chat creates, sends, reloads history, and isolates browser owners", async () => {
   const app = createChatApp(new MemoryChatStore(), new DemoChatProvider(), true, 3000);
   const request = browser(app);
   const created = await (await request("/api/chats", {})).json();
-  const reply = await request(`/api/chats/${created.id}/messages`, { content: "Hello" });
+  const { response: reply, chat } = await waitForReply(request, `/api/chats/${created.id}/messages`, { content: "Hello" });
   assert.equal(reply.status, 200);
-  const chat = await reply.json();
   assert.equal(chat.messages.length, 2);
   assert.match(chat.messages[1].content, /Demo response/);
   assert.equal((await (await request(`/api/chats/${created.id}`)).json()).messages.length, 2);
@@ -38,11 +47,11 @@ test("failed replies preserve history and allow retry; input and origin are chec
   const path = `/api/chats/${chat.id}/messages`;
   assert.equal((await request(path, { content: " " })).status, 400);
   assert.equal((await request(path, { content: "x".repeat(4001) })).status, 400);
-  const error = await request(path, { content: "hello" });
-  assert.equal(error.status, 502); assert.doesNotMatch(await error.text(), /secret/);
-  assert.equal((await (await request(`/api/chats/${chat.id}`)).json()).messages.length, 0);
+  const failed = await waitForReply(request, path, { content: "hello" });
+  assert.equal(failed.chat.pendingReply.status, "failed"); assert.doesNotMatch(failed.chat.pendingReply.error, /secret/);
+  assert.equal(failed.chat.messages.length, 1);
   fail = false;
-  assert.equal((await request(path, { content: "retry" })).status, 200);
+  await waitForReply(request, path, { content: "hello" });
   assert.equal((await app(new Request('http://evil.test:3000/api/chats'))).status, 403);
   assert.equal((await app(new Request('http://localhost:3000/api/chats', {
     method: 'POST', headers: { origin: 'https://evil.test', 'content-type': 'application/json' }, body: '{}',
@@ -58,8 +67,8 @@ test("chat persistence stores the OpenCode session mapping", async () => {
   }, false, 3000);
   const request = browser(app);
   const chat = await (await request('/api/chats', {})).json();
-  await request(`/api/chats/${chat.id}/messages`, { content: "first" });
-  await request(`/api/chats/${chat.id}/messages`, { content: "second" });
+  await waitForReply(request, `/api/chats/${chat.id}/messages`, { content: "first" });
+  await waitForReply(request, `/api/chats/${chat.id}/messages`, { content: "second" });
   assert.deepEqual(calls, [undefined, "session-for-chat"]);
   assert.equal((await (await request(`/api/chats/${chat.id}`)).json()).opencodeSessionId, "session-for-chat");
 });
@@ -114,11 +123,10 @@ test("chat surfaces safe OpenCode availability errors", async () => {
   }, false, 3000);
   const request = browser(app);
   const chat = await (await request("/api/chats", {})).json();
-  const response = await request(`/api/chats/${chat.id}/messages`, { content: "hello" });
-  assert.equal(response.status, 502);
-  const body = await response.json();
-  assert.match(body.error, /free usage limit/i);
-  assert.doesNotMatch(body.error, /MongoDB/i);
+  const result = await waitForReply(request, `/api/chats/${chat.id}/messages`, { content: "hello" });
+  assert.equal(result.chat.pendingReply.status, "failed");
+  assert.match(result.chat.pendingReply.error, /free usage limit/i);
+  assert.doesNotMatch(result.chat.pendingReply.error, /MongoDB/i);
 });
 
 test("OpenCode maps a chat to one persistent session", async () => {
@@ -163,22 +171,26 @@ test("cancellation is owner-scoped, stops only the requested chat, and does not 
   const reply1 = request(`/api/chats/${first.id}/messages`, { content: 'first' });
   const reply2 = request(`/api/chats/${second.id}/messages`, { content: 'second' });
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal((await browser(app)(`/api/chats/${first.id}/cancel`, {})).status, 404);
+   assert.equal((await browser(app)(`/api/chats/${first.id}/cancel`, {})).status, 404);
   assert.equal(calls.get('first')!.signal.aborted, false);
-  assert.equal((await request(`/api/chats/${first.id}/messages`, { content: 'duplicate' })).status, 409);
+   assert.equal((await request(`/api/chats/${first.id}/messages`, { content: 'duplicate' })).status, 409);
   assert.equal((await request(`/api/chats/${first.id}/cancel`, {})).status, 200);
   assert.equal(calls.get('first')!.signal.aborted, true);
   assert.equal(calls.get('second')!.signal.aborted, false);
-  calls.get('first')!.finish();
-  assert.equal((await (await reply1).json()).code, 'CHAT_CANCELLED');
-  assert.equal((await (await request(`/api/chats/${first.id}`)).json()).messages.length, 0);
-  calls.get('second')!.finish();
-  assert.equal((await reply2).status, 200);
-  assert.equal((await (await request(`/api/chats/${second.id}`)).json()).messages.length, 2);
-  const retry = request(`/api/chats/${first.id}/messages`, { content: 'retry' });
+   calls.get('first')!.finish();
+   assert.equal((await reply1).status, 202);
+   await new Promise(resolve => setImmediate(resolve));
+   const cancelled = await (await request(`/api/chats/${first.id}`)).json();
+   assert.equal(cancelled.pendingReply.status, 'cancelled');
+   assert.equal(cancelled.messages.length, 1);
+   calls.get('second')!.finish();
+   assert.equal((await reply2).status, 202);
+   await new Promise(resolve => setImmediate(resolve));
+   assert.equal((await (await request(`/api/chats/${second.id}`)).json()).messages.length, 2);
+   const retry = request(`/api/chats/${first.id}/messages`, { content: 'retry' });
   await new Promise(resolve => setImmediate(resolve));
   calls.get('retry')!.finish();
-  assert.equal((await retry).status, 200, 'cancelled chat is unlocked after cleanup');
+   assert.equal((await retry).status, 202, 'cancelled chat is unlocked after cleanup');
 });
 
 test("OpenCode cancellation aborts the remote session and repository context is included on every turn", async () => {

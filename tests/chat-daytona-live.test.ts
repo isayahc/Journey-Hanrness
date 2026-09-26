@@ -12,7 +12,7 @@ test('live chat → Daytona → checks → GitHub PR, including retry and persis
   assert.ok(token && repository, 'Set JOURNEY_SMOKE_SESSION and JOURNEY_SMOKE_REPOSITORY for the disposable repository');
   const api = async (path: string, body?: unknown) => {
     const response = await fetch(`${origin}${path}`, {
-      method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(105000),
+      method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(5 * 60 * 1000),
       headers: { origin, cookie: `journey_session=${token}`, 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
     });

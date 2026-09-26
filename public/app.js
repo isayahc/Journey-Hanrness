@@ -21,6 +21,7 @@ let enabledRepositories = [];
 let chatJobsTimer;
 let chatJobsVersion = 0;
 const retryMessages = new Map();
+const CHAT_POLL_INTERVAL_MS = 1000;
 function retryMessage(id) {
   if (!id) return null;
   if (retryMessages.has(id)) return retryMessages.get(id);
@@ -102,7 +103,7 @@ function render() {
   ++chatJobsVersion;
   const retry = retryMessage(current?.id);
   if (retry && !pendingReplies.has(activeKey)) {
-    if (current.messages.some(message => message.requestId === retry.requestId)) saveRetry(current.id, null);
+    if (current.messages.some(message => message.role === 'assistant' && message.requestId === retry.requestId)) saveRetry(current.id, null);
     else if (!drafts.has(activeKey)) {
       drafts.set(activeKey, retry.content);
       chatErrors.set(activeKey, 'The previous reply was interrupted. Your message is ready to retry with the same request ID.');
@@ -335,7 +336,16 @@ $('#composer').onsubmit = async event => {
       void refreshHistory().catch(() => {});
     }
     saveRetry(chat.id, { requestId: operation.requestId, content });
-    const result = await api(`/api/chats/${chat.id}/messages`, { content, requestId: operation.requestId }, 105000);
+    let result = await api(`/api/chats/${chat.id}/messages`, { content, requestId: operation.requestId }, 15000);
+    while (result.pendingReply?.status === 'queued' || result.pendingReply?.status === 'running') {
+      await new Promise(resolve => setTimeout(resolve, CHAT_POLL_INTERVAL_MS));
+      result = await api(`/api/chats/${chat.id}`, undefined, 15000);
+    }
+    if (result.pendingReply?.status === 'failed' || result.pendingReply?.status === 'cancelled') {
+      const error = new Error(result.pendingReply.error || (result.pendingReply.status === 'cancelled' ? 'Reply stopped.' : 'Reply failed.'));
+      error.code = result.pendingReply.status === 'cancelled' ? 'CHAT_CANCELLED' : undefined;
+      throw error;
+    }
     saveRetry(chat.id, null);
     if (activeKey === key) current = result;
   } catch (error) {
