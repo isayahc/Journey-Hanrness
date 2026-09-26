@@ -6,6 +6,16 @@ Set `MONGODB_URI` to the event Atlas Sandbox connection string and use
 `MONGODB_DB=journey_harness`. The local example URI is for optional development
 with `docker compose up -d --wait`.
 
+`npm run db:init` initializes the database indexes, including `goal_runs`.
+Application startup also initializes goal indexes automatically. The database
+user needs read/write access (including collection/index creation) to the configured
+database. No additional environment variables are needed for goal planning.
+
+Each run saves its selected model and execution limits. The goal form accepts
+1–20 steps, 1–5 execution attempts per step, and a 1–240 minute execution budget.
+These execution limits are stored for the future executor. Planning itself is
+limited to three attempts per run, with a 90-second model request timeout.
+
 `OPENCODE_URL` defaults to `http://127.0.0.1:4096`. To change the managed service
 port, change the URL. `npm start` uses this same address for startup and requests.
 Remote HTTP(S) services are supported but must be started separately.

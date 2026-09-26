@@ -7,6 +7,9 @@ import { MemoryAgentJobAuthorizationStore, MongoAgentJobAuthorizationStore } fro
 import { githubOAuthFromEnv, type GitHubInstallationVerifier } from "./auth/github.js";
 import { MemoryAuthStore, MongoAuthStore } from "./auth/store.js";
 import { connectDatabase } from "./db.js";
+import { MemoryRunStore, MongoRunStore } from "./runs/store.js";
+import { DemoRunPlanner, OpenCodeRunPlanner } from "./runs/planner.js";
+import { RunService } from "./runs/service.js";
 import { createChatApp, type AuthRuntime, type GitHubAppRuntime } from "./chat/app.js";
 import { DemoChatProvider, OpenCodeChatProvider } from "./chat/provider.js";
 import { MemoryChatStore, MongoChatStore, type Conversation } from "./chat/store.js";
@@ -38,6 +41,9 @@ async function main() {
   const db = demo ? undefined : await connectDatabase();
   const store = db ? new MongoChatStore(db.database.collection<Conversation>("chat_conversations")) : new MemoryChatStore();
   if (store instanceof MongoChatStore) await store.init();
+  const runStore = db ? new MongoRunStore(db.runs) : new MemoryRunStore();
+  await runStore.init();
+  const runs = new RunService(runStore, demo ? new DemoRunPlanner() : new OpenCodeRunPlanner());
 
   const github = githubOAuthFromEnv(origin.origin);
   let auth: AuthRuntime | undefined;
@@ -108,7 +114,7 @@ async function main() {
     throw new Error("GITHUB_APP_SLUG requires GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET");
   }
 
-  const app = createChatApp(store, provider, demo, port, auth, origin.origin, githubApp);
+  const app = createChatApp(store, provider, demo, port, auth, origin.origin, githubApp, runs);
   const allowedHosts = new Set([origin.host]);
   if (origin.protocol === "http:" && ["localhost", "127.0.0.1"].includes(origin.hostname)) {
     const localPort = origin.port || String(port);

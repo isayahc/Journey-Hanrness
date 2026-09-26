@@ -1,7 +1,7 @@
 # Journey Harness
 
-An OpenCode agent workspace with persistent conversations and controlled
-GitHub repository jobs. The next milestones add durable goal execution,
+An OpenCode agent workspace with persistent goals, execution plans, conversations,
+and controlled GitHub repository jobs. The next milestones add step execution,
 checkpoint recovery, memory, and measured adaptation.
 
 ## Start
@@ -26,6 +26,15 @@ npm start
 Open **http://localhost:3000**. Startup launches OpenCode, waits for its health
 check, and starts the app. If the configured OpenCode server is already healthy,
 startup reuses it. Ctrl+C stops only the processes launched by this command.
+
+Choose **Goals & plans** to submit a goal, measurable success criteria, and limits.
+The goal is saved before OpenCode generates ordered steps with dependencies and
+verification requirements. Reloading or restarting the app preserves the goal and
+plan in MongoDB. Plans are proposals; step execution is a separate upcoming increment.
+
+If planning fails, the goal stays saved with an actionable error. Retry planning
+up to three times per run. After an interrupted request, retry becomes available
+within two minutes. The model recorded when the run was created is retained on retry.
 
 The model default for chat and repository jobs is:
 
@@ -69,6 +78,8 @@ See [configuration](docs/configuration.md) for GitHub setup and
 | `npm run opencode:serve` | Start OpenCode separately on local port 4096 |
 | `npm run check` | Typecheck |
 | `npm test` | Run tests |
+| `npm run db:init` | Initialize database indexes, including goal runs |
+| `npm run test:browser` | Verify goal creation and reload in Chromium; with `MONGODB_TEST_URI`, also verify a full app restart |
 | `npm run build` | Compile TypeScript |
 
 `npm ci` is supported for repeatable installation. If lifecycle scripts were
@@ -79,9 +90,14 @@ For optional local database development, use `docker compose up -d --wait`.
 Database integration tests use `MONGODB_TEST_URI` and disposable test databases.
 Docker is not needed when using Atlas.
 
+Install the browser for local UI verification with `npx playwright install chromium`.
+Browser tests use a deterministic model fixture with MongoDB; without
+`MONGODB_TEST_URI`, they verify the labeled demo interface with temporary storage.
+The browser suite uses its own disposable database and never the application database.
+
 ## Delivery plan
 
 Follow [Epic #1](https://github.com/isayahc/Journey-Hanrness/issues/1) in separate
-PRs. This setup includes the chat and controlled repository agent runtime.
-Long-running goal execution, restart checkpoints, evaluation loops, and learned
-strategies are subsequent increments.
+PRs. Goal creation and validated planning are implemented. Long-running step
+execution, restart checkpoints, evaluation loops, and learned strategies are
+subsequent increments.

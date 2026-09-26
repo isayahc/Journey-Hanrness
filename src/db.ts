@@ -1,4 +1,6 @@
 import { MongoClient } from "mongodb";
+import type { GoalRun } from "./runs/models.js";
+import { MongoRunStore } from "./runs/store.js";
 import type { AgentJobAuthorization } from "./agents/job-authorizations.js";
 import type { AuthSession, GitHubIdentity, OAuthState } from "./auth/store.js";
 import type { GitHubInstallationLink, GitHubInstallationState } from "./github/installations.js";
@@ -16,6 +18,7 @@ export async function connectDatabase() {
     return {
       client,
       database: db,
+      runs: db.collection<GoalRun>("goal_runs"),
       users: db.collection<PlatformUser>("users"),
       profiles: db.collection<ProspectProfile>("prospect_profiles"),
       jobs: db.collection<ResearchJob>("research_jobs"),
@@ -37,6 +40,7 @@ export type Database = Awaited<ReturnType<typeof connectDatabase>>;
 
 export async function ensureIndexes(db: Database) {
   await Promise.all([
+    new MongoRunStore(db.runs).init(),
     db.users.createIndex({ userId: 1 }, { unique: true }),
     db.profiles.createIndex({ userId: 1 }, { unique: true }),
     db.jobs.createIndex({ jobId: 1 }, { unique: true }),
