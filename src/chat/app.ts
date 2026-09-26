@@ -114,6 +114,58 @@ export function createChatApp(
   const chatJobs = new ChatJobService(store, auth ? githubApp : undefined);
   const goalExecutor = runs ? new GoalExecutor(runs.store, auth ? githubApp : undefined) : undefined;
   const withJobs = async (chat: Conversation) => ({ ...chat, jobs: await chatJobs.states(chat) });
+  const runReply = async (ownerId: string, chatId: string, requestId: string) => {
+    if (busy.has(chatId)) return;
+    const chat = await store.startReply(ownerId, chatId, requestId);
+    if (!chat?.pendingReply) return;
+    const controller = new AbortController();
+    busy.set(chatId, controller);
+    try {
+      let github: ChatRepositoryContext = { status: "not_configured", total: 0, truncated: false, repositories: [] };
+      if (auth && githubApp) {
+        const [installations, repositories] = await Promise.all([
+          githubApp.store.listForUser(ownerId), githubApp.repositoryStore.listForUser(ownerId),
+        ]);
+        const activeInstallations = new Set(installations.map(installation => installation.installationId));
+        const connected = repositories.filter(repository => activeInstallations.has(repository.installationId));
+        github = {
+          status: installations.length ? "connected" : "not_connected", total: connected.length, truncated: connected.length > 200,
+          repositories: connected.slice(0, 200).map(repository => ({
+            fullName: repository.fullName, defaultBranch: repository.defaultBranch, private: repository.private,
+            archived: repository.archived, agentEnabled: repository.agentEnabled && !repository.archived,
+            lastSyncedAt: repository.lastSyncedAt.toISOString(),
+          })),
+        };
+      }
+      const reply = await provider.reply(chat.messages, chat.opencodeSessionId, chat.opencodeSessionVersion,
+        { ownerId, kind: "chat", resourceId: chat.id }, { signal: controller.signal, github, execution: chatJobs.availability(), jobs: await chatJobs.states(chat) });
+      controller.signal.throwIfAborted();
+      const assistant: Message = { role: "assistant", content: reply.content, requestId };
+      if (reply.execution) {
+        try {
+          assistant.job = await chatJobs.prepare(ownerId, reply.execution);
+          assistant.content = `Job requested for ${assistant.job.repositoryFullName}. Progress, checks and the pull request will appear below.`;
+        } catch (error) { assistant.content = jobSubmissionError(error); }
+      }
+      if (await store.completeReply(ownerId, chat.id, requestId, assistant, reply.opencodeSessionId, reply.opencodeSessionVersion)) {
+        const saved = await store.get(ownerId, chat.id);
+        if (saved && assistant.job) void chatJobs.dispatch(saved, assistant).catch(() => {});
+      }
+    } catch (error) {
+      const cancelled = controller.signal.aborted;
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[chat] async reply failed", { chatId, error: message });
+      const userError = cancelled ? "Reply stopped." : error instanceof OpenCodeChatError || message.startsWith("OpenCode server is unreachable")
+        ? message : "Reply failed. Check MongoDB, your OpenCode server, and model access, then try again.";
+      await store.failReply(ownerId, chat.id, requestId, userError, cancelled);
+      if (busy.get(chatId) === controller) busy.delete(chatId);
+    } finally {
+      if (busy.get(chatId) === controller) busy.delete(chatId);
+    }
+  };
+  const recoverReplies = async () => {
+    for (const chat of await store.pendingReplies()) if (chat.pendingReply) void runReply(chat.ownerId, chat.id, chat.pendingReply.requestId);
+  };
   const configuredOrigin = new URL(appOrigin).origin;
   const allowed = new Set([configuredOrigin]);
   const originUrl = new URL(configuredOrigin);
@@ -481,70 +533,32 @@ export function createChatApp(
         if (request.method === "POST" && match[2] === "/cancel") {
           const active = busy.get(chat.id);
           active?.abort(new DOMException("Reply stopped", "AbortError"));
-          return json({ cancelled: Boolean(active) });
+          if (!active && chat.pendingReply && ["queued", "running"].includes(chat.pendingReply.status)) await store.failReply(ownerId, chat.id, chat.pendingReply.requestId, "Reply stopped.", true);
+          return json({ cancelled: Boolean(active || chat.pendingReply) });
         }
         if (request.method !== "POST" || match[2] !== "/messages") return json({ error: "Not found." }, 404);
         let input;
         try { input = messageInput.parse(await request.json()); } catch { return json({ error: "Enter a message of 1–4,000 characters." }, 400); }
         const requestId = input.requestId || randomUUID();
         const previous = chat.messages.find(message => message.role === "user" && message.requestId === requestId);
-        if (previous) return previous.content === input.content ? json(await withJobs(chat)) : json({ error: "This request ID belongs to a different message." }, 409);
+        if (previous && previous.content !== input.content) return json({ error: "This request ID belongs to a different message." }, 409);
         if (chat.messages.length >= 100) return json({ error: "Start a new chat to continue (50 turns per chat)." }, 400);
-        if (busy.has(chat.id)) return json({ error: "A reply is already in progress." }, 409);
-        const controller = new AbortController();
-        busy.set(chat.id, controller);
-        try {
-          const user = { role: "user" as const, content: input.content, requestId };
-          let github: ChatRepositoryContext = { status: "not_configured", total: 0, truncated: false, repositories: [] };
-          if (auth && githubApp) {
-            const [installations, repositories] = await Promise.all([
-              githubApp.store.listForUser(ownerId), githubApp.repositoryStore.listForUser(ownerId),
-            ]);
-            const activeInstallations = new Set(installations.map(installation => installation.installationId));
-            const connected = repositories.filter(repository => activeInstallations.has(repository.installationId));
-            github = {
-              status: installations.length ? "connected" : "not_connected",
-              total: connected.length, truncated: connected.length > 200,
-              repositories: connected.slice(0, 200).map(repository => ({
-                fullName: repository.fullName, defaultBranch: repository.defaultBranch,
-                private: repository.private, archived: repository.archived,
-                agentEnabled: repository.agentEnabled && !repository.archived,
-                lastSyncedAt: repository.lastSyncedAt.toISOString(),
-              })),
-            };
+        if (chat.pendingReply) {
+          if (["queued", "running"].includes(chat.pendingReply.status)) return json({ error: "A reply is already in progress." }, 409);
+          if (chat.pendingReply.status === "failed" || chat.pendingReply.status === "cancelled") {
+            if (previous && !await store.retryReply(ownerId, chat.id, requestId, input.content)) return json({ error: "Chat changed in another tab. Reload before sending again." }, 409);
+            if (previous) {
+              void runReply(ownerId, chat.id, requestId);
+              return json(await withJobs((await store.get(ownerId, chat.id))!), 202);
+            }
           }
-          controller.signal.throwIfAborted();
-          const reply = await provider.reply([...chat.messages, user], chat.opencodeSessionId, chat.opencodeSessionVersion,
-            { ownerId, kind: "chat", resourceId: chat.id }, { signal: controller.signal, github, execution: chatJobs.availability(), jobs: await chatJobs.states(chat) });
-          controller.signal.throwIfAborted();
-          const assistant: Message = { role: "assistant", content: reply.content, requestId };
-          if (reply.execution) {
-            try {
-              assistant.job = await chatJobs.prepare(ownerId, reply.execution);
-              assistant.content = `Job requested for ${assistant.job.repositoryFullName}. Progress, checks and the pull request will appear below.`;
-            } catch (error) { assistant.content = jobSubmissionError(error); }
-          }
-          controller.signal.throwIfAborted();
-          // A database commit cannot be aborted. Stop must stop reporting success once it begins.
-          if (busy.get(chat.id) === controller) busy.delete(chat.id);
-          if (!await store.append(chat, [user, assistant], reply.opencodeSessionId, reply.opencodeSessionVersion)) {
-            const latest = await store.get(ownerId, chat.id);
-            if (latest?.messages.some(message => message.role === "user" && message.requestId === requestId && message.content === input.content)) return json(await withJobs(latest));
-            return json({ error: "Chat changed in another tab. Reload before sending again." }, 409);
-          }
-          // The persisted job now has its own Cancel control.
-          // The startup/periodic outbox worker recovers if dispatch or the HTTP response is lost.
-          void chatJobs.dispatch(chat, assistant).catch(() => {});
-          return json(await withJobs((await store.get(ownerId, chat.id))!));
-        } catch (error) {
-          if (controller.signal.aborted) return json({ error: "Reply stopped.", code: "CHAT_CANCELLED" }, 409);
-          const message = error instanceof Error ? error.message : String(error);
-          console.error("[chat] reply failed", { chatId: chat.id, error: message });
-          const userError = error instanceof OpenCodeChatError || message.startsWith("OpenCode server is unreachable")
-            ? message
-            : "Reply failed. Check MongoDB, your OpenCode server, and model access, then try again.";
-          return json({ error: userError }, 502);
-        } finally { if (busy.get(chat.id) === controller) busy.delete(chat.id); }
+        }
+        if (previous) return json(await withJobs(chat));
+        if ((chat.pendingReply && ["queued", "running"].includes(chat.pendingReply.status)) || busy.has(chat.id)) return json({ error: "A reply is already in progress." }, 409);
+        const user = { role: "user" as const, content: input.content, requestId };
+        if (!await store.queueReply(chat, user)) return json({ error: "Chat changed in another tab. Reload before sending again." }, 409);
+        void runReply(ownerId, chat.id, requestId);
+        return json(await withJobs((await store.get(ownerId, chat.id))!), 202);
       }
 
       return json({ error: "Not found." }, 404);
@@ -553,5 +567,5 @@ export function createChatApp(
       return json({ error: "The service is temporarily unavailable. Please try again." }, 503);
     }
   };
-  return Object.assign(handle, { recoverJobs: async () => { await Promise.all([chatJobs.recover(), goalExecutor?.recover()]); } });
+  return Object.assign(handle, { recoverJobs: async () => { await Promise.all([recoverReplies(), chatJobs.recover(), goalExecutor?.recover()]); } });
 }

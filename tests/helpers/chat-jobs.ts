@@ -69,8 +69,18 @@ export async function chatJobsFixture(chats: ChatStore = new MemoryChatStore(), 
     method: body === undefined ? 'GET' : 'POST', headers: { origin: 'http://localhost:3000', cookie: `journey_session=${token}`, 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body),
   }));
   const chat = await chats.create(alice.userId);
+  const send = async (content = 'Build my app', requestId = randomUUID()) => {
+    const accepted = await request(`/api/chats/${chat.id}/messages`, { content, requestId });
+    if (accepted.status !== 202) return accepted;
+    for (;;) {
+      const response = await request(`/api/chats/${chat.id}`);
+      const value = await response.json();
+      if (value.pendingReply?.status === 'queued' || value.pendingReply?.status === 'running') { await new Promise(resolve => setImmediate(resolve)); continue; }
+      return value.pendingReply?.status === 'failed' ? Response.json({ error: value.pendingReply.error }, { status: 502 }) : Response.json(value);
+    }
+  };
   return { state, auth, alice, other, session, chats, jobs, installations, repositories, runtime, executor, executionRuntime, github, chat, request,
-    send: (content = 'Build my app', requestId = randomUUID()) => request(`/api/chats/${chat.id}/messages`, { content, requestId }),
+    send,
     handle: (request: Request) => app(request),
     restart() { app = makeApp(); return app; }, recover: () => app.recoverJobs(),
   };

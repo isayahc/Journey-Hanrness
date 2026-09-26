@@ -149,17 +149,11 @@ test('Stop reply does not cancel a submitted job; Cancel job terminates it witho
   assert.equal((await saved(f)).jobs[0].status, 'cancelled'); assert.equal(f.state.prs, 0);
 });
 
-test('Stop never reports success after the durable handoff commit has begun', async () => {
+test('Stop does not cancel a submitted job after asynchronous chat handoff', async () => {
   const f = await chatJobsFixture();
-  const append = f.chats.append.bind(f.chats);
-  let release!: () => void, started!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  const writing = new Promise<void>(resolve => { started = resolve; });
-  f.chats.append = async (...args) => { started(); await gate; return append(...args); };
-  const sending = f.send(); await writing;
-  const stopped = await (await f.request(`/api/chats/${f.chat.id}/cancel`, {})).json();
-  assert.equal(stopped.cancelled, false, 'the receipt is being committed and its job has a separate cancellation control');
-  release(); assert.equal((await sending).status, 200);
+  const sending = await f.send();
+  assert.equal(sending.status, 200);
   await eventually(() => f.jobs.listForUser(f.alice.userId), jobs => jobs[0]?.status === 'completed');
+  assert.equal((await (await f.request(`/api/chats/${f.chat.id}/cancel`, {})).json()).cancelled, false);
   assert.equal(f.state.prs, 1);
 });

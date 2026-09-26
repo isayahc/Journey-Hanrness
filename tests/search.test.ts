@@ -163,8 +163,13 @@ test("chat invokes Tavily with persisted scope and exposes owner-scoped evidence
   }
   const chat = await (await request("/api/chats", {})).json();
   const response = await request(`/api/chats/${chat.id}/messages`, { content: "Find official information" });
-  assert.equal(response.status, 200);
-  const saved = await response.json();
+  assert.equal(response.status, 202);
+  let saved;
+  for (;;) {
+    saved = await (await request(`/api/chats/${chat.id}`)).json();
+    if (!saved.pendingReply || ["failed", "cancelled"].includes(saved.pendingReply.status)) break;
+    await new Promise(resolve => setImmediate(resolve));
+  }
   assert.equal(saved.opencodeSessionVersion, 6);
   const permission = calls.find(call => call.path === "/session")?.body.permission;
   assert.ok(permission.some((item: any) => item.permission === "tavily_search" && item.action === "allow"));
