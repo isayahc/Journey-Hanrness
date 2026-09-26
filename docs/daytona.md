@@ -61,7 +61,7 @@ stops the sandbox for inspection/recovery. Cleanup failures are recorded as
 MongoDB records the last observed lifecycle state and expiry, not a live mirror
 of provider-side automatic deletion.
 
-A MongoDB atomic claim permits one worker per job with a 90-minute lease. An
+A MongoDB atomic claim permits one worker per job with a 90-second lease renewed every 30 seconds. An
 interrupted worker's job may be resumed after the lease expires; a failed job
 releases its lease immediately. Authenticated owner-only endpoints:
 
@@ -86,7 +86,9 @@ a matching PR is reused. Failed lookups or a different remote head return
 `AGENT_RECOVERY_REQUIRES_RECONCILIATION` and never blindly push again. If a local
 commit finishes before its checkpoint is saved, recovery may require inspection;
 it does not fabricate success. Unclaimed chat submissions are recovered automatically from the conversation outbox.
-Running or failed jobs require owner resume; provider TTL handles abandoned sandboxes.
+Standalone running or failed jobs require owner resume; goal-linked jobs are recovered by
+the goal worker, with failed steps requiring goal resume. Worker writes are fenced by claim
+tokens. Provider TTL handles abandoned sandboxes. See [goal execution](goal-execution.md).
 
 ## Verification
 

@@ -1,3 +1,5 @@
+import { fencedJobStore, JOB_LEASE_MS } from "./job-authorizations.js";
+import { resolveOpenCodeModel } from "../opencode-model.js";
 import { scaffoldInput, type ScaffoldInput } from "../chat/execution.js";
 import { scaffoldNextApp } from "./scaffold.js";
 import { randomUUID } from "node:crypto";
@@ -34,6 +36,10 @@ export interface CreateRepositoryJobInput {
   scaffold?: ScaffoldInput;
   chat?: { id: string; requestId: string };
   executionBackend?: "daytona";
+  model?: string;
+  deadlineAt?: Date;
+  run?: { id: string; stepId: string };
+  parentJobId?: string;
 }
 
 export interface RepositoryExecutionRuntime {
@@ -49,6 +55,8 @@ export interface RepositoryExecutionRuntime {
 
 const SAFE_FAILURES = new Set([
   "DAYTONA_REQUIRED",
+  "AGENT_LEASE_LOST",
+  "AGENT_DEADLINE_EXCEEDED",
   "AGENT_SCAFFOLD_FAILED",
   "AGENT_SCAFFOLD_CONFLICT",
   "AGENT_SCAFFOLD_PATH_DENIED",
@@ -155,12 +163,16 @@ export class AgentRepositoryExecutor {
     if (scaffold && this.backend !== "daytona") throw new Error("DAYTONA_REQUIRED");
     const jobId = input.jobId || randomUUID();
     if (!/^[0-9a-f-]{36}$/.test(jobId)) throw new Error("AGENT_JOB_NOT_AUTHORIZED");
+    const model = input.model ? resolveOpenCodeModel({ OPENCODE_MODEL: input.model }).name : undefined;
+    if (input.deadlineAt && input.deadlineAt <= new Date()) throw new Error("AGENT_DEADLINE_EXCEEDED");
     const existing = await this.runtime.jobs.get(jobId, input.userId);
     const verifyExisting = (job: AgentJobAuthorization) => {
       if (job.repositoryId !== input.repositoryId || job.request !== input.instruction.trim()
         || JSON.stringify(job.scaffold) !== JSON.stringify(scaffold)
         || JSON.stringify(job.chat) !== JSON.stringify(input.chat)
-        || job.executionBackend !== input.executionBackend) throw new Error("AGENT_JOB_NOT_AUTHORIZED");
+        || job.executionBackend !== input.executionBackend
+        || job.model !== model || +new Date(job.deadlineAt || 0) !== +new Date(input.deadlineAt || 0)
+        || JSON.stringify(job.run) !== JSON.stringify(input.run) || job.parentJobId !== input.parentJobId) throw new Error("AGENT_JOB_NOT_AUTHORIZED");
       return job;
     };
     if (existing) return verifyExisting(existing);
@@ -171,12 +183,17 @@ export class AgentRepositoryExecutor {
       input.repositoryId,
       "createBranch",
     );
+    const parent = input.parentJobId ? await this.runtime.jobs.get(input.parentJobId, input.userId) : null;
+    if (input.parentJobId && (!parent || parent.repositoryId !== input.repositoryId || parent.status !== "completed"
+      || !parent.commitSha || !parent.branch || !parent.run || parent.run.id !== input.run?.id)) throw new Error("AGENT_JOB_NOT_AUTHORIZED");
+    const baseBranch = parent?.branch || repository.defaultBranch;
     let baseSha = await this.runtime.github.getRepositoryBranchHead(
       repository.installationId,
       repository.repositoryId,
       repository.fullName,
-      repository.defaultBranch,
+      baseBranch,
     );
+    if (parent && baseSha !== parent.commitSha) throw new Error("AGENT_RECOVERY_REQUIRES_RECONCILIATION");
     if (!baseSha) {
       await this.runtime.github.initializeRepository(
         repository.installationId,
@@ -197,12 +214,14 @@ export class AgentRepositoryExecutor {
       throw new Error("AGENT_BRANCH_CREATE_FAILED");
     try { return await this.runtime.jobs.create(jobId, input.userId, input.repositoryId, {
       repositoryFullName: repository.fullName,
-      defaultBranch: repository.defaultBranch,
+      defaultBranch: baseBranch,
       baseSha,
       branch,
       request: input.instruction.trim(),
-      ...(scaffold ? { scaffold } : {}), ...(input.chat ? { chat: input.chat } : {}),
+      ...(scaffold ? { scaffold, checkDirectory: scaffold.directory } : parent?.checkDirectory ? { checkDirectory: parent.checkDirectory } : {}), ...(input.chat ? { chat: input.chat } : {}),
       ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
+      ...(model ? { model } : {}), ...(input.deadlineAt ? { deadlineAt: input.deadlineAt } : {}),
+      ...(input.run ? { run: input.run } : {}), ...(input.parentJobId ? { parentJobId: input.parentJobId } : {}),
     }); } catch (error) {
       const concurrent = await this.runtime.jobs.get(jobId, input.userId);
       if (concurrent) return verifyExisting(concurrent);
@@ -217,7 +236,7 @@ export class AgentRepositoryExecutor {
     return path;
   }
 
-  async execute(job: AgentJobAuthorization, instruction: string) {
+  async execute(job: AgentJobAuthorization, instruction: string, runAttempt?: number) {
     if (
       !job.repositoryFullName ||
       !job.defaultBranch ||
@@ -230,18 +249,32 @@ export class AgentRepositoryExecutor {
     const claimed = await this.runtime.jobs.claim(
       job.jobId,
       job.userId,
-      new Date(Date.now() + 90 * 60 * 1000),
+      new Date(Date.now() + JOB_LEASE_MS),
     );
     if (!claimed) throw new Error("AGENT_JOB_NOT_AUTHORIZED");
     job = claimed;
+    const jobs = fencedJobStore(this.runtime.jobs, claimed);
+    let lostLease = false;
+    const owns = async () => {
+      const saved = await this.runtime.jobs.get(job.jobId, job.userId);
+      return !!saved && saved.leaseToken === claimed.leaseToken && !!saved.leaseUntil
+        && saved.leaseUntil > new Date() && saved.status !== "cancelled";
+    };
+    const active = async () => {
+      if (lostLease || !await owns()) throw new Error("AGENT_LEASE_LOST");
+      if (job.deadlineAt && job.deadlineAt <= new Date()) throw new Error("AGENT_DEADLINE_EXCEEDED");
+    };
+    const heartbeat = setInterval(() => {
+      void jobs.updateExecution(job.jobId, job.userId, { leaseUntil: new Date(Date.now() + JOB_LEASE_MS) })
+        .catch(() => { lostLease = true; });
+    }, JOB_LEASE_MS / 3);
+    heartbeat.unref();
     const request = job.request || instruction.trim();
     let session: ExecutionWorkspace | undefined;
     let success = false;
-    await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
-      startedAt: new Date(),
-      failure: undefined,
-    });
     try {
+      await active();
+      await jobs.updateExecution(job.jobId, job.userId, { startedAt: job.startedAt || new Date(), failure: undefined, ...(runAttempt ? { runAttempt } : {}) });
       if (job.executionBackend === "daytona" && this.backend !== "daytona") throw new Error("DAYTONA_REQUIRED");
       if (
         !job.repositoryFullName ||
@@ -284,7 +317,7 @@ export class AgentRepositoryExecutor {
               );
           }
           job.checkpoint = "pushed";
-          await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
+          await jobs.updateExecution(job.jobId, job.userId, {
             checkpoint: "pushed",
           });
         } catch {
@@ -296,7 +329,7 @@ export class AgentRepositoryExecutor {
         (job.checkpoint === "completed" && job.pullRequestUrl)
       ) {
         if (recoveredPullRequest) {
-          await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
+          await jobs.updateExecution(job.jobId, job.userId, {
             checkpoint: "completed",
             pullRequestNumber: recoveredPullRequest.number,
             pullRequestUrl: recoveredPullRequest.url,
@@ -308,21 +341,28 @@ export class AgentRepositoryExecutor {
           });
         }
         success = true;
-        await this.runtime.jobs.setStatus(job.jobId, job.userId, "completed");
+        await jobs.setStatus(job.jobId, job.userId, "completed");
         try {
-          await this.runtime.environment?.cancel?.(job, this.runtime.jobs);
+          await this.runtime.environment?.cancel?.(job, jobs);
         } catch {}
-        return this.runtime.jobs.get(job.jobId, job.userId);
+        return jobs.get(job.jobId, job.userId);
       }
       if (!this.runtime.environment && job.checkpoint)
         throw new Error("AGENT_WORKSPACE_RECOVERY_REQUIRED");
       session = this.runtime.environment
-        ? await this.runtime.environment.open(job, this.runtime.jobs)
+        ? await this.runtime.environment.open(job, jobs)
         : await localWorkspace(
             this.workspace(job.jobId),
             this.runtime.commands,
             this.runtime.agent,
           );
+      const rawCommands = session.commands;
+      session.commands = { run: async (command, args, options) => {
+        await active();
+        const remaining = job.deadlineAt ? +job.deadlineAt - Date.now() : Infinity;
+        const result = await rawCommands.run(command, args, { ...options, timeoutMs: Math.min(options.timeoutMs ?? 120_000, remaining) });
+        await active(); return result;
+      } };
       const workspace = session.path;
       const root = session.root ?? resolve(workspace, "..");
       const commands = session.commands;
@@ -373,7 +413,7 @@ export class AgentRepositoryExecutor {
         );
         if (branch.code !== 0) throw new Error("AGENT_BRANCH_CREATE_FAILED");
 
-        await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
+        await jobs.updateExecution(job.jobId, job.userId, {
           checkpoint: "workspace",
         });
       }
@@ -381,12 +421,14 @@ export class AgentRepositoryExecutor {
       if ((!job.checkpoint || job.checkpoint === "workspace") && job.scaffold) {
         if (this.backend !== "daytona") throw new Error("DAYTONA_REQUIRED");
         await scaffoldNextApp(session, job.jobId, job.scaffold);
-        await this.runtime.jobs.updateExecution(job.jobId, job.userId, { checkpoint: "scaffolded" });
+        await jobs.updateExecution(job.jobId, job.userId, { checkpoint: "scaffolded" });
       }
       if (!job.checkpoint || ["workspace", "scaffolded"].includes(job.checkpoint)) {
         const setup = job.scaffold ? `\nThe harness has scaffolded Next.js in ${job.scaffold.directory}. Customize those files for this request. Do not run setup commands; dependencies and checks run afterward.` : "";
-        await session.agent.modify(workspace, request + setup);
-        await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
+        await active();
+        await session.agent.modify(workspace, request + setup, { model: job.model, deadlineAt: job.deadlineAt });
+        await active();
+        await jobs.updateExecution(job.jobId, job.userId, {
           checkpoint: "modified",
         });
       }
@@ -411,8 +453,8 @@ export class AgentRepositoryExecutor {
 
       let checks = job.checks || [];
       if (!["committed", "pushed"].includes(job.checkpoint || "")) {
-        checks = await this.runChecks(session, cleanEnv, job.scaffold?.directory);
-        await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
+        checks = await this.runChecks(session, cleanEnv, job.checkDirectory || job.scaffold?.directory);
+        await jobs.updateExecution(job.jobId, job.userId, {
           checks,
         });
         if (checks.some((check) => !check.ok))
@@ -477,7 +519,7 @@ export class AgentRepositoryExecutor {
           : `Created commit ${sha.stdout.trim()}.`;
 
       if (!["committed", "pushed"].includes(job.checkpoint || "")) {
-        await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
+        await jobs.updateExecution(job.jobId, job.userId, {
           checkpoint: "committed",
           commitSha: sha.stdout.trim(),
           summary,
@@ -519,7 +561,7 @@ export class AgentRepositoryExecutor {
           workspace,
           gitCredentialEnvironment(pushCredential.token),
         );
-        await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
+        await jobs.updateExecution(job.jobId, job.userId, {
           checkpoint: "push_pending",
         });
         const push = await commands.run(
@@ -532,7 +574,7 @@ export class AgentRepositoryExecutor {
           },
         );
         if (push.code !== 0) throw new Error("AGENT_PUSH_FAILED");
-        await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
+        await jobs.updateExecution(job.jobId, job.userId, {
           checkpoint: "pushed",
           commitSha: sha.stdout.trim(),
           summary,
@@ -540,7 +582,7 @@ export class AgentRepositoryExecutor {
       }
 
       if (
-        !(await this.runtime.jobs.authorizeCredentialJob(
+        !(await jobs.authorizeCredentialJob(
           job.userId,
           job.jobId,
           job.repositoryId,
@@ -552,7 +594,7 @@ export class AgentRepositoryExecutor {
         job.repositoryId,
         "openPullRequest",
       );
-      await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
+      await jobs.updateExecution(job.jobId, job.userId, {
         checkpoint: "pr_pending",
       });
       let pullRequest;
@@ -572,7 +614,7 @@ export class AgentRepositoryExecutor {
         throw new Error("AGENT_PULL_REQUEST_FAILED");
       }
 
-      await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
+      await jobs.updateExecution(job.jobId, job.userId, {
         checkpoint: "completed",
         artifacts: [
           { kind: "diff", uri: `${pullRequest.url}/files` },
@@ -583,32 +625,32 @@ export class AgentRepositoryExecutor {
         completedAt: new Date(),
       });
       success = true;
-      return await this.runtime.jobs.setStatus(
+      return await jobs.setStatus(
         job.jobId,
         job.userId,
         "completed",
       );
     } catch (error) {
-      await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
+      if (!await owns()) throw new Error("AGENT_LEASE_LOST");
+      await jobs.updateExecution(job.jobId, job.userId, {
         failure: safeFailure(error),
         completedAt: new Date(),
       });
       if (
-        (await this.runtime.jobs.get(job.jobId, job.userId))?.status !==
+        (await jobs.get(job.jobId, job.userId))?.status !==
         "cancelled"
       ) {
-        await this.runtime.jobs.setStatus(job.jobId, job.userId, "failed");
+        await jobs.setStatus(job.jobId, job.userId, "failed");
       }
       throw new Error(safeFailure(error));
     } finally {
-      this.runtime.credentials.invalidateJob(job.userId, job.jobId);
-      const cancelled =
-        (await this.runtime.jobs.get(job.jobId, job.userId))?.status ===
-        "cancelled";
-      await session?.close(success, cancelled);
-      await this.runtime.jobs.updateExecution(job.jobId, job.userId, {
-        leaseUntil: new Date(0),
-      });
+      clearInterval(heartbeat);
+      // A replaced worker must not stop/delete the replacement's workspace or release its lease.
+      if (await owns()) {
+        this.runtime.credentials.invalidateJob(job.userId, job.jobId);
+        try { await session?.close(success, false); }
+        finally { await jobs.updateExecution(job.jobId, job.userId, { leaseUntil: new Date(0) }).catch(() => {}); }
+      }
     }
   }
 
@@ -621,6 +663,7 @@ export class AgentRepositoryExecutor {
     if (!job) return null;
     if (job.status === "completed") return job;
     await this.runtime.jobs.setStatus(jobId, userId, "cancelled");
+    await this.runtime.jobs.updateExecution(jobId, userId, { leaseUntil: new Date(0) });
     this.runtime.credentials.invalidateJob(userId, jobId);
     try {
       await this.runtime.environment?.cancel?.(job, this.runtime.jobs);

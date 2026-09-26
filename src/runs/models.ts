@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { scaffoldInput } from "../chat/execution.js";
 
 export const runInput = z.object({
   goal: z.string().trim().min(1).max(4000),
@@ -17,6 +18,11 @@ const stepSchema = z.object({
   instruction: z.string().trim().min(1).max(2000),
   dependsOn: z.array(z.string()).max(20),
   verification: z.string().trim().min(1).max(1000),
+  execution: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("repository_change"), scaffold: scaffoldInput.optional() }).strict(),
+    z.object({ kind: z.literal("inspect_checks") }).strict(),
+    z.object({ kind: z.literal("unsupported"), reason: z.string().trim().min(1).max(500) }).strict(),
+  ]).optional(),
 }).strict();
 const planSchema = z.object({
   summary: z.string().trim().min(1).max(1500),
@@ -51,7 +57,10 @@ export interface GoalRun extends RunInput {
   id: string;
   ownerId: string;
   model: string;
-  status: "draft" | "planning" | "planned" | "blocked";
+  status: "draft" | "planning" | "planned" | "blocked" | "running" | "awaiting_evaluation";
+  execution?: RunExecution;
+  executionToken?: string;
+  executionLeaseUntil?: Date;
   createdAt: Date;
   updatedAt: Date;
   planningAttempts: number;
@@ -62,11 +71,38 @@ export interface GoalRun extends RunInput {
 }
 
 export function publicRun(run: GoalRun, now = new Date()) {
-  const { ownerId: _owner, planningToken: _token, ...data } = run;
+  const { ownerId: _owner, planningToken: _token, executionToken: _executionToken, ...data } = run;
   return {
     ...data,
-    canPlan: run.status !== "planned" && run.planningAttempts < MAX_PLANNING_ATTEMPTS
+    canStart: run.status === "planned" && !run.execution,
+    canResume: run.status === "blocked" && !!run.execution && run.execution.deadlineAt > now
+      && !["UNSUPPORTED_PLAN", "JOB_CANCELLED", "JOB_BINDING_MISMATCH", "CHECK_EVIDENCE_REQUIRED"].includes(run.execution.error?.code || "")
+      && (run.execution.steps.find(step => step.status !== "succeeded")?.attempts ?? Infinity) < run.limits.maxAttemptsPerStep,
+    canPlan: !run.execution && run.status !== "planned" && run.planningAttempts < MAX_PLANNING_ATTEMPTS
       && (run.status !== "planning" || !!run.planningExpiresAt && run.planningExpiresAt <= now),
     maxPlanningAttempts: MAX_PLANNING_ATTEMPTS,
   };
 }
+
+/** Execution success records completed work, never verification of natural-language criteria. */
+export interface StepExecution {
+  id: string;
+  status: "pending" | "running" | "succeeded" | "blocked";
+  attempts: number;
+  jobId?: string;
+  checkpoint?: string;
+  output?: { summary?: string; commitSha?: string; pullRequestUrl?: string; checks: Array<{ command: string; ok: boolean }> };
+  error?: { code: string; message: string };
+  startedAt?: Date;
+  completedAt?: Date;
+  evaluation: "pending";
+}
+export interface RunExecution {
+  repositoryId: number;
+  repositoryFullName: string;
+  startedAt: Date;
+  deadlineAt: Date;
+  steps: StepExecution[];
+  error?: { code: string; message: string };
+}
+export const EXECUTION_LEASE_MS = 30_000;

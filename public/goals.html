@@ -40,7 +40,7 @@
               <label for="max-minutes">Time budget (minutes)<input id="max-minutes" type="number" min="1" max="240" value="30" required></label>
             </div>
           </fieldset>
-          <p class="goal-note">This creates a plan. Steps will not run yet. Your limits are saved for execution.</p>
+          <p class="goal-note">Review the plan before starting execution in an enabled repository. Your limits apply across restarts.</p>
           <button id="create-run" class="goal-primary" type="submit">Save goal &amp; generate plan</button>
         </form>
       </details>
@@ -54,7 +54,14 @@
         <div id="plan-result" hidden>
           <h3>Proposed execution plan</h3><div id="plan-summary"></div>
           <ol id="plan-steps" class="plan-steps"></ol>
-          <p class="goal-note">Plan saved. No steps have been executed.</p>
+          <p id="execution-note" class="goal-note"></p>
+          <div id="execution-controls" hidden>
+            <label for="run-repository">Repository for this plan</label>
+            <select id="run-repository" aria-label="Repository for this plan"></select>
+            <button id="execute-run" class="goal-primary" type="button">Execute plan</button>
+          </div>
+          <button id="resume-run" type="button" hidden>Resume execution</button>
+          <p id="execution-error" class="run-error" role="alert" hidden></p>
         </div>
       </section>
     </div>

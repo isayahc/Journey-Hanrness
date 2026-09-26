@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { AgentGitHubCredentialBroker } from '../../src/agents/credential-broker.js';
 import { MemoryAgentJobAuthorizationStore, type AgentJobAuthorizationStore } from '../../src/agents/job-authorizations.js';
-import { AgentRepositoryExecutor } from '../../src/agents/repository-executor.js';
+import { AgentRepositoryExecutor, type RepositoryExecutionRuntime } from '../../src/agents/repository-executor.js';
 import { MemoryAuthStore } from '../../src/auth/store.js';
 import { createChatApp, type GitHubAppRuntime } from '../../src/chat/app.js';
 import { OpenCodeChatProvider } from '../../src/chat/provider.js';
@@ -32,26 +32,27 @@ export async function chatJobsFixture(chats: ChatStore = new MemoryChatStore(), 
     return { code: command === 'npm' && state.failCheck ? 1 : command === 'node' ? state.failSetup : 0, stdout, stderr: '' };
   } };
   const github = {
-    async getRepositoryBranchHead() { await state.headGate; return state.emptyHead ? '' : 'a'.repeat(40); },
+    async getRepositoryBranchHead(_installation?: number, _repository?: number, _name?: string, branch = "main") { await state.headGate; return state.emptyHead ? '' : (branch.startsWith("journey-harness/") ? 'b' : 'a').repeat(40); },
     async initializeRepository() { state.emptyHead = false; },
     async mintRepositoryCredential() { return { token: 'private-test-token', expiresAt: new Date(Date.now() + 3600000) }; },
     async createRepositoryPullRequest() { state.prs++; return { number: 42, url: 'https://github.com/alice/app/pull/42' }; },
   };
   const credentials = new AgentGitHubCredentialBroker(jobs, repositories, github);
   const agent = { async modify() { state.edits++; await state.editGate; } };
-  const executor = new AgentRepositoryExecutor({ jobs, repositories, github, credentials, commands, agent,
-    environment: { backend: 'daytona', async open(job) {
+  const executionRuntime: RepositoryExecutionRuntime = { jobs, repositories, github, credentials, commands, agent,
+    environment: { backend: 'daytona', async open(job, jobStore) {
       state.opens++;
       const sandbox = { id: `sandbox-${job.jobId}`, name: `sandbox-${job.jobId}`, state: 'running' as const, updatedAt: new Date(), expiresAt: new Date(Date.now() + 3600000) };
-      await jobs.updateExecution(job.jobId, job.userId, { sandbox });
+      await jobStore.updateExecution(job.jobId, job.userId, { sandbox });
       return { path: `/tmp/test/${job.jobId}/repo`, commands, agent,
         environment: async (_cwd, extra) => ({ CI: '1', ...extra }),
         readText: async () => JSON.stringify({ scripts: { check: 'tsc --noEmit', build: 'next build' } }),
         prepareChecks: async directory => { state.calls.push({ command: 'install', args: [], cwd: directory! }); return { command: 'npm install', ok: true }; },
-        close: async (success, cancelled) => { await jobs.updateExecution(job.jobId, job.userId, { sandbox: { ...sandbox, state: success || cancelled ? 'deleted' : 'stopped' } }); },
+        close: async (success, cancelled) => { await jobStore.updateExecution(job.jobId, job.userId, { sandbox: { ...sandbox, state: success || cancelled ? 'deleted' : 'stopped' } }); },
       };
-    }, async cancel(job) { state.cancels++; if (job.sandbox) await jobs.updateExecution(job.jobId, job.userId, { sandbox: { ...job.sandbox, state: 'deleted' } }); } },
-  });
+    }, async cancel(job, jobStore) { state.cancels++; if (job.sandbox) await jobStore.updateExecution(job.jobId, job.userId, { sandbox: { ...job.sandbox, state: 'deleted' } }); } },
+  };
+  const executor = new AgentRepositoryExecutor(executionRuntime);
   const runtime: GitHubAppRuntime = { slug: 'journey', store: installations, repositoryStore: repositories, jobStore: jobs, repositoryExecutor: executor,
     verifier: { installationAuthorizationUrl: () => '', verifyInstallationCode: async () => ({ profile: { id: 1, login: 'alice' }, installations: [] }) } };
   const provider = new OpenCodeChatProvider({}, async (input, init) => {
@@ -68,7 +69,7 @@ export async function chatJobsFixture(chats: ChatStore = new MemoryChatStore(), 
     method: body === undefined ? 'GET' : 'POST', headers: { origin: 'http://localhost:3000', cookie: `journey_session=${token}`, 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body),
   }));
   const chat = await chats.create(alice.userId);
-  return { state, auth, alice, other, session, chats, jobs, installations, repositories, runtime, executor, chat, request,
+  return { state, auth, alice, other, session, chats, jobs, installations, repositories, runtime, executor, executionRuntime, github, chat, request,
     send: (content = 'Build my app', requestId = randomUUID()) => request(`/api/chats/${chat.id}/messages`, { content, requestId }),
     handle: (request: Request) => app(request),
     restart() { app = makeApp(); return app; }, recover: () => app.recoverJobs(),
