@@ -168,6 +168,7 @@ export function createChatApp(
       }
       acceptingActivity = false;
       await writes;
+      controller.signal.throwIfAborted();
       assistant.activity = activity;
       if (await store.completeReply(ownerId, chat.id, requestId, assistant, reply.opencodeSessionId, reply.opencodeSessionVersion)) {
         const saved = await store.get(ownerId, chat.id);
@@ -558,7 +559,7 @@ export function createChatApp(
         if (request.method === "POST" && match[2] === "/cancel") {
           const active = busy.get(chat.id);
           active?.abort(new DOMException("Reply stopped", "AbortError"));
-          if (!active && chat.pendingReply && ["queued", "running"].includes(chat.pendingReply.status)) await store.failReply(ownerId, chat.id, chat.pendingReply.requestId, "Reply stopped.", true);
+          if (chat.pendingReply && ["queued", "running"].includes(chat.pendingReply.status)) await store.failReply(ownerId, chat.id, chat.pendingReply.requestId, "Reply stopped.", true);
           return json({ cancelled: Boolean(active || chat.pendingReply) });
         }
         if (request.method !== "POST" || match[2] !== "/messages") return json({ error: "Not found." }, 404);
@@ -571,6 +572,7 @@ export function createChatApp(
         if (chat.pendingReply) {
           if (["queued", "running"].includes(chat.pendingReply.status)) return json({ error: "A reply is already in progress." }, 409);
           if (chat.pendingReply.status === "failed" || chat.pendingReply.status === "cancelled") {
+            if (busy.has(chat.id)) return json({ error: "The previous reply is still stopping. Try again shortly." }, 409);
             if (previous && !await store.retryReply(ownerId, chat.id, requestId, input.content)) return json({ error: "Chat changed in another tab. Reload before sending again." }, 409);
             if (previous) {
               void runReply(ownerId, chat.id, requestId);

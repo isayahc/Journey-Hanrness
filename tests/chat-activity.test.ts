@@ -146,3 +146,30 @@ test("chat API persists public progress during a reply, then attaches it to the 
     assert.equal(JSON.stringify(await (await request("")).json()).includes("Late event"), false);
   } finally { release(); }
 });
+
+test("Stop wins while an answer is waiting for its activity writes to finish", async () => {
+  const store = new MemoryChatStore();
+  let release!: () => void, writing = false;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const update = store.updateReplyActivity.bind(store);
+  store.updateReplyActivity = async (...args) => { writing = true; await gate; await update(...args); };
+  const app = createChatApp(store, { async reply() { return { content: "Too late" }; } }, true, 3000);
+  let cookie = "";
+  const request = async (path: string, body?: object) => {
+    const result = await app(new Request(`http://localhost:3000${path}`, { method: body ? "POST" : "GET", headers: { cookie, origin: "http://localhost:3000", "content-type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) }));
+    cookie = result.headers.get("set-cookie")?.split(";")[0] || cookie; return result;
+  };
+  const chat = await (await request("/api/chats", {})).json();
+  try {
+    const requestId = crypto.randomUUID();
+    await request(`/api/chats/${chat.id}/messages`, { content: "Question", requestId });
+    await eventually(async () => writing, Boolean);
+    await request(`/api/chats/${chat.id}/cancel`, {});
+    assert.equal((await (await request(`/api/chats/${chat.id}`)).json()).pendingReply.status, "cancelled");
+    assert.equal((await request(`/api/chats/${chat.id}/messages`, { content: "Question", requestId })).status, 409, "a stopped worker cannot overwrite a new retry");
+    release(); await new Promise(resolve => setImmediate(resolve));
+    const saved = await (await request(`/api/chats/${chat.id}`)).json();
+    assert.equal(saved.pendingReply.status, "cancelled");
+    assert.equal(saved.messages.some((message: { role: string }) => message.role === "assistant"), false);
+  } finally { release(); }
+});
